@@ -72,7 +72,7 @@ jobs:
       - name: Validate archives and assemble deployment bundle
         run: python tools/package_release.py
       - name: Install built wheel
-        run: python -m pip install --no-deps dist/*.whl
+        run: python -m pip install --no-deps --no-compile dist/*.whl
       - name: Smoke-test installed API and bundled task outside the checkout
         working-directory: ${{ runner.temp }}
         env:
@@ -84,9 +84,12 @@ jobs:
           from fastapi.testclient import TestClient
           import swe_eval
           from swe_eval.api import create_app
+          from swe_eval.benchmarks.local import LocalBenchmark
           from swe_eval.config import Settings
           root = Path(os.environ['PROJECT_ROOT'])
           assert not Path(swe_eval.__file__).is_relative_to(root / 'src'), 'Must test the installed wheel'
+          benchmark = LocalBenchmark()
+          benchmark.source_archive(benchmark.get_task('intervals-001'))
           token = 'ci-only-administrator-token-for-package-smoke-test'
           with tempfile.TemporaryDirectory() as directory:
               app = create_app(Settings(Path(directory), root / 'config/models.json', token))

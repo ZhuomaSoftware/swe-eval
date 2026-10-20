@@ -5,7 +5,9 @@ COPY requirements-core.lock ./
 RUN pip install --no-cache-dir --no-deps -r requirements-core.lock
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
-RUN pip install --no-cache-dir --no-deps --no-build-isolation . \
+# pip's explicit bytecode compilation ignores PYTHONDONTWRITEBYTECODE and would
+# add __pycache__ files to the pinned benchmark snapshot installed as package data.
+RUN pip install --no-cache-dir --no-deps --no-compile --no-build-isolation . \
     && groupadd --gid 10001 service && useradd --uid 10001 --gid 10001 --no-create-home service \
     && mkdir /data && chown 10001:10001 /data
 COPY config/ /app/config/

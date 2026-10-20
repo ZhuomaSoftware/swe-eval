@@ -197,6 +197,14 @@ python -m build --no-isolation
 python tools/package_release.py
 ```
 
+Install a built wheel with `python -m pip install --no-compile <wheel-file>`.
+The fixture's Python files are immutable benchmark data. Pip's default bytecode
+compilation adds `__pycache__` files inside that snapshot, which correctly causes
+its base-commit check to fail. The service images and installed-wheel CI check
+use `--no-compile`; `PYTHONDONTWRITEBYTECODE=1` alone does not disable pip's explicit
+compilation. The installed-wheel smoke test also validates the source archive
+before checking the API.
+
 Build into a clean `dist/` directory: the validator expects one wheel for the
 current version. [`MANIFEST.in`](MANIFEST.in) includes deployment requirements in
 the sdist. The deployment archive uses an explicit file allowlist and bundled
