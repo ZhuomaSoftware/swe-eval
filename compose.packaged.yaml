@@ -1,0 +1,6 @@
+# Combine with compose.yaml after loading the downloaded Docker image bundle.
+services:
+  api:
+    image: swe-eval-api:${SWE_IMAGE_TAG:?Set SWE_IMAGE_TAG to the packaged version}
+  worker:
+    image: swe-eval-worker:${SWE_IMAGE_TAG:?Set SWE_IMAGE_TAG to the packaged version}

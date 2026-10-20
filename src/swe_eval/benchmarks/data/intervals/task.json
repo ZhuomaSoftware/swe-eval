@@ -1,0 +1,37 @@
+{
+  "id": "intervals-001",
+  "benchmark": "local-python-repairs",
+  "dataset_version": "1.0.0",
+  "repository": {
+    "kind": "snapshot",
+    "path": "repository"
+  },
+  "base_commit": "180a5be07e3c5fb60d5759748a32a77e80566e85",
+  "issue": "merge_ranges merges overlapping closed intervals but incorrectly leaves intervals that share an endpoint separate. For example, [(1, 3), (3, 5)] must produce [(1, 5)]. Merge all transitively overlapping ranges, including touching endpoints. Preserve support for unsorted input, duplicates, nested ranges, negative endpoints, and zero-length ranges. Do not merge disjoint integer-adjacent ranges such as (1, 2) and (3, 4). Do not mutate the caller's input. Reversed ranges must continue to raise ValueError. Implement the repair in intervals.py and run the available tests.",
+  "test_commands": [
+    [
+      "python3",
+      "-I",
+      "-S",
+      "/opt/hidden/grade.py"
+    ]
+  ],
+  "success_marker": "SWE_EVAL_REGRESSION_PASSED:9",
+  "allowed_patch_paths": [
+    "intervals.py"
+  ],
+  "runtime": {
+    "agent_image": "swe-eval-sandbox:phase1",
+    "evaluator_image": "swe-eval-grader:phase1",
+    "requirements": [
+      "Python 3.11.12",
+      "git",
+      "bash",
+      "coreutils",
+      "no pip packages needed"
+    ]
+  },
+  "command_timeout": 20,
+  "test_timeout": 20,
+  "time_limit": 600
+}

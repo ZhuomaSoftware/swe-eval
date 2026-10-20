@@ -1,0 +1,18 @@
+include README.md VALIDATION.md pyproject.toml
+include compose.yaml compose.packaged.yaml
+include .env.example .dockerignore .gitignore
+include requirements-*.lock
+include config/models.json
+recursive-include docker *.Dockerfile
+recursive-include tools *.py
+recursive-include tests *.py
+recursive-include .github/workflows *.yml
+recursive-include src/swe_eval/benchmarks/data *
+global-exclude *.py[cod]
+global-exclude __pycache__
+exclude .env models.local.json
+prune .git
+prune .venv
+prune data
+prune dist
+prune build

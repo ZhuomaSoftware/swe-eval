@@ -1,0 +1,4 @@
+# Install core first. Tests use unittest; HTTPX is for FastAPI TestClient.
+httpx==0.28.1
+httpcore==1.0.9
+certifi==2025.4.26

@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools==80.9.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "independent-swe-eval"
+version = "0.1.0"
+description = "Independent, Docker-isolated SWE evaluation service"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi==0.115.12",
+  "uvicorn==0.34.2",
+  "pydantic==2.11.7",
+]
+
+[project.optional-dependencies]
+agent = ["mini-swe-agent==2.4.6"]
+test = ["httpx==0.28.1"]
+
+[project.scripts]
+swe-eval = "swe_eval.cli:main"
+
+[project.urls]
+Repository = "https://github.com/ZhuomaSoftware/swe-eval"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+swe_eval = ["benchmarks/data/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

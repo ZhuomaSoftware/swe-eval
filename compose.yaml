@@ -1,0 +1,55 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/service.Dockerfile
+      target: api
+    environment:
+      SWE_ADMIN_TOKEN: ${SWE_ADMIN_TOKEN:?Set a random administrator token}
+      SWE_DATA_DIR: /data
+      SWE_MODELS_FILE: /app/config/models.json
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - swe-data:/data
+      - ./config/models.json:/app/config/models.json:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Explicit opt-in: this worker can control the host Docker daemon.
+  worker:
+    profiles: [local-worker]
+    build:
+      context: .
+      dockerfile: docker/service.Dockerfile
+      target: worker
+    environment:
+      SWE_DATA_DIR: /data
+      SWE_MODELS_FILE: /app/config/models.json
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY:-}
+      SECONDARY_GATEWAY_API_KEY: ${SECONDARY_GATEWAY_API_KEY:-}
+    volumes:
+      - swe-data:/data
+      - ./config/models.json:/app/config/models.json:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    # On Linux set DOCKER_GID=$(stat -c '%g' /var/run/docker.sock).
+    group_add: ["${DOCKER_GID:-0}"]
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 40s
+    restart: unless-stopped
+
+volumes:
+  swe-data:

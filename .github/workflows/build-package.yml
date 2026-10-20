@@ -1,0 +1,187 @@
+name: Build and package
+
+"on":
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      build_images:
+        description: Build and package the Docker images as well
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-package-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  python:
+    name: Python distributions and deployment bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements-*.lock
+      - name: Read and validate build version
+        id: metadata
+        env:
+          BUILD_REF_TYPE: ${{ github.ref_type }}
+          BUILD_REF_NAME: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os, re, subprocess, tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path('pyproject.toml').read_text())['project']['version']
+          if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}', version):
+              raise SystemExit('Package version is not a valid image tag')
+          if os.environ['BUILD_REF_TYPE'] == 'tag' and os.environ['BUILD_REF_NAME'] != f'v{version}':
+              raise SystemExit('Tag must match the pyproject.toml version: v' + version)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              print('version=' + version, file=output)
+          timestamp = subprocess.check_output(['git', 'show', '-s', '--format=%ct'], text=True).strip()
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              print('SOURCE_DATE_EPOCH=' + timestamp, file=output)
+          PY
+      - name: Install pinned runtime, test, and build dependencies
+        run: python -m pip install --no-deps -r requirements-core.lock -r requirements-agent.lock -r requirements-test.lock -r requirements-build.lock
+      - name: Run backend and installed-mini contract tests
+        run: python -m unittest discover -s tests -v
+        env:
+          PYTHONPATH: src
+          MSWEA_SILENT_STARTUP: '1'
+          MSWEA_GLOBAL_CONFIG_DIR: ${{ runner.temp }}/swe-mini-config
+      - name: Build wheel and source distribution
+        run: python -m build --no-isolation
+      - name: Validate archives and assemble deployment bundle
+        run: python tools/package_release.py
+      - name: Install built wheel
+        run: python -m pip install --no-deps dist/*.whl
+      - name: Smoke-test installed API and bundled task outside the checkout
+        working-directory: ${{ runner.temp }}
+        env:
+          PROJECT_ROOT: ${{ github.workspace }}
+        run: |
+          python - <<'PY'
+          import os, tempfile
+          from pathlib import Path
+          from fastapi.testclient import TestClient
+          import swe_eval
+          from swe_eval.api import create_app
+          from swe_eval.config import Settings
+          root = Path(os.environ['PROJECT_ROOT'])
+          assert not Path(swe_eval.__file__).is_relative_to(root / 'src'), 'Must test the installed wheel'
+          token = 'ci-only-administrator-token-for-package-smoke-test'
+          with tempfile.TemporaryDirectory() as directory:
+              app = create_app(Settings(Path(directory), root / 'config/models.json', token))
+              with TestClient(app) as client:
+                  assert client.get('/health').status_code == 200
+                  response = client.get('/api/v1/tasks', headers={'Authorization': f'Bearer {token}'})
+                  assert response.status_code == 200
+                  assert any(task['id'] == 'intervals-001' for task in response.json()['items'])
+          PY
+      - name: Upload Python packages and deployment source
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: swe-eval-python-${{ steps.metadata.outputs.version }}-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Summarize Python artifacts
+        env:
+          PACKAGE_VERSION: ${{ steps.metadata.outputs.version }}
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          printf 'Built Python version **%s**: [wheel, sdist, deployment bundle, metadata and checksums](%s).\n' "$PACKAGE_VERSION" "$ARTIFACT_URL" >> "$GITHUB_STEP_SUMMARY"
+
+  images:
+    name: Docker deployment images (linux/amd64)
+    needs: python
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.build_images)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PACKAGE_VERSION: ${{ needs.python.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Build separate coding and hidden-grader images
+        run: |
+          docker build --platform linux/amd64 -t swe-eval-sandbox:phase1 -t "swe-eval-sandbox:$PACKAGE_VERSION" -f docker/sandbox.Dockerfile .
+          docker build --platform linux/amd64 -t swe-eval-grader:phase1 -t "swe-eval-grader:$PACKAGE_VERSION" -f docker/grader.Dockerfile .
+      - name: Build API and dedicated worker images
+        run: |
+          docker build --platform linux/amd64 --target api -t "swe-eval-api:$PACKAGE_VERSION" -f docker/service.Dockerfile .
+          docker build --platform linux/amd64 --target worker -t "swe-eval-worker:$PACKAGE_VERSION" -f docker/service.Dockerfile .
+      - name: Verify good and unchanged repairs with the packaged worker
+        run: |
+          docker run --rm --network=none --read-only \
+            --group-add "$(stat -c '%g' /var/run/docker.sock)" \
+            --cap-drop=ALL --security-opt=no-new-privileges:true \
+            --tmpfs /data:rw,nosuid,nodev,size=64m,uid=10001,gid=10001 \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            --env SWE_DATA_DIR=/data \
+            "swe-eval-worker:$PACKAGE_VERSION" swe-eval verify-fixture
+      - name: Save images, image identities, and checksums
+        run: |
+          mkdir -p dist/images
+          docker image save \
+            "swe-eval-api:$PACKAGE_VERSION" "swe-eval-worker:$PACKAGE_VERSION" \
+            swe-eval-sandbox:phase1 "swe-eval-sandbox:$PACKAGE_VERSION" \
+            swe-eval-grader:phase1 "swe-eval-grader:$PACKAGE_VERSION" \
+            | gzip -1 > "dist/images/swe-eval-images-$PACKAGE_VERSION-linux-amd64.tar.gz"
+          python - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          version = os.environ['PACKAGE_VERSION']
+          tags = [f'swe-eval-{name}:{version}' for name in ('api', 'worker', 'sandbox', 'grader')]
+          inspected = json.loads(subprocess.check_output(['docker', 'image', 'inspect', *tags]))
+          metadata = {'version': version, 'commit': os.environ['GITHUB_SHA'], 'platform': 'linux/amd64',
+                      'images': {tag: info['Id'] for tag, info in zip(tags, inspected)}}
+          root = Path('dist/images')
+          (root / 'image-info.json').write_text(json.dumps(metadata, indent=2) + '\n')
+          with (root / 'SHA256SUMS').open('w') as output:
+              for path in sorted(root.iterdir()):
+                  if path.name == 'SHA256SUMS':
+                      continue
+                  with path.open('rb') as source:
+                      digest = hashlib.file_digest(source, 'sha256').hexdigest()
+                  print(f'{digest}  {path.name}', file=output)
+          PY
+      - name: Upload Docker image bundle
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: swe-eval-images-${{ needs.python.outputs.version }}-linux-amd64-${{ github.sha }}
+          path: dist/images/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Summarize image artifact
+        env:
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          printf 'Built Docker version **%s**: [linux/amd64 image bundle and checksums](%s). Load with `docker image load --input swe-eval-images-%s-linux-amd64.tar.gz`.\n' "$PACKAGE_VERSION" "$ARTIFACT_URL" "$PACKAGE_VERSION" >> "$GITHUB_STEP_SUMMARY"

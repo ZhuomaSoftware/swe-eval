@@ -1,0 +1,35 @@
+[
+  {
+    "id": "gateway-primary",
+    "upstream_id": "sub2api-primary",
+    "model_id": "6.1-sol",
+    "base_url": "https://gateway.example.com/v1",
+    "api_key_env": "GATEWAY_API_KEY",
+    "capabilities": {
+      "protocol": "chat_completions",
+      "action_format": "text",
+      "reasoning_effort": false,
+      "output_token_parameter": "max_tokens"
+    },
+    "request_timeout": 60,
+    "max_output_tokens": 4096,
+    "max_agent_steps": 30,
+    "max_model_calls": 35,
+    "max_evaluation_duration": 600,
+    "max_total_tokens": 100000
+  },
+  {
+    "id": "gateway-secondary",
+    "upstream_id": "sub2api-secondary-channel",
+    "model_id": "6.1-sol",
+    "base_url": "https://other-gateway.example.com/v1",
+    "api_key_env": "SECONDARY_GATEWAY_API_KEY",
+    "capabilities": {
+      "action_format": "text",
+      "reasoning_effort": true,
+      "output_token_parameter": "max_completion_tokens"
+    },
+    "reasoning_effort": "medium",
+    "max_evaluation_duration": 600
+  }
+]

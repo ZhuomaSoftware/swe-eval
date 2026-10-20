@@ -1,0 +1,26 @@
+name: test
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  unit-and-docker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --no-deps -r requirements-core.lock -r requirements-agent.lock -r requirements-test.lock
+      - run: python -m pip install --no-deps --no-build-isolation -e .
+      - run: docker build -t swe-eval-sandbox:phase1 -f docker/sandbox.Dockerfile .
+      - run: docker build -t swe-eval-grader:phase1 -f docker/grader.Dockerfile .
+      - run: python -m unittest discover -s tests -v
+        env:
+          SWE_DOCKER_TESTS: '1'
+          MSWEA_SILENT_STARTUP: '1'
+          MSWEA_GLOBAL_CONFIG_DIR: /tmp/swe-eval-mini-config
+      - name: No-inference fixture demonstration
+        run: swe-eval verify-fixture
+        env:
+          SWE_DATA_DIR: /tmp/swe-eval-demo

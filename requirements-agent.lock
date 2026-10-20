@@ -1,0 +1,11 @@
+# Install core first, then this with --no-deps. This is intentionally the
+# DefaultAgent import closure, not mini's CLI/LiteLLM/datasets dependency graph.
+mini-swe-agent==2.4.6
+Jinja2==3.1.6
+MarkupSafe==3.0.2
+python-dotenv==1.1.0
+platformdirs==4.3.8
+rich==14.0.0
+markdown-it-py==3.0.0
+mdurl==0.1.2
+Pygments==2.19.1
