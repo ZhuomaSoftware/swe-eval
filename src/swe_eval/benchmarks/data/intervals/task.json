@@ -13,9 +13,11 @@
       "python3",
       "-I",
       "-S",
-      "/opt/hidden/grade.py"
+      "/opt/hidden/grade.py",
+      "judge"
     ]
   ],
+  "grading_protocol": "isolated_operations_v2",
   "success_marker": "SWE_EVAL_REGRESSION_PASSED:9",
   "allowed_patch_paths": [
     "intervals.py"

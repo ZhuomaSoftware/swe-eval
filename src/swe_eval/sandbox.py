@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
+import json
 import selectors
-import shlex
 import subprocess
 import tempfile
 import time
@@ -32,11 +32,20 @@ class CommandResult:
     truncated: bool = False
 
 
+@dataclass
+class GradingResult:
+    """Produced by the trusted controller, never by a candidate command."""
+    verdict: dict
+    operations: list[CommandResult]
+    controller_image_digest: str
+
+
 class Sandbox(Protocol):
     def prepare(self, source: bytes, task: Task) -> None: ...
     def command(self, command: str, timeout: float) -> CommandResult: ...
     def capture_patch(self, base_commit: str) -> str: ...
     def apply_patch(self, patch: str, task: Task) -> bool: ...
+    def tests(self, task: Task) -> GradingResult: ...
     def close(self) -> None: ...
 
 
@@ -79,12 +88,16 @@ def run_process(argv: list[str], *, timeout: float, stdin: bytes = b"",
 
 class DockerSandbox:
     def __init__(self, docker: str, service_id: str, run_id: str, task: Task, *, evaluator=False,
+                 trusted_controller=False,
                  remaining: Callable[[], float] = lambda: 600,
                  check: Callable[[], None] = lambda: None):
         self.docker, self.task = docker, task
+        self.service_id, self.run_id = service_id, run_id
         self.remaining, self.check = remaining, check
-        self.name = f"swe-{service_id[:12]}-{run_id}-{'eval' if evaluator else 'agent'}"
-        self.image = task.runtime.evaluator_image if evaluator else task.runtime.agent_image
+        self.name = f"swe-{service_id[:12]}-{run_id}-{'controller' if trusted_controller else 'eval' if evaluator else 'agent'}"
+        # Both coding and evaluation candidates use an image WITHOUT hidden
+        # files. Only the controller gets the grader image, never candidate data.
+        self.image = task.runtime.evaluator_image if trusted_controller else task.runtime.agent_image
         self.image_digest = None
         self.created = False
         runtime = task.runtime
@@ -177,13 +190,67 @@ class DockerSandbox:
         return True
 
     def tests(self, task):
-        results = []
-        for argv in task.test_commands:
-            result = self.command(shlex.join(argv), task.test_timeout)
-            results.append(result)
-            if result.returncode:
-                break
-        return results
+        if len(task.test_commands) != 1 or task.test_commands[0][-1] != "judge":
+            raise SandboxError("task requires an isolated_operations_v2 controller command ending in judge")
+        controller = DockerSandbox(self.docker, self.service_id, self.run_id, task,
+                                   trusted_controller=True, remaining=self.remaining, check=self.check)
+        started = time.monotonic()
+
+        def budget():
+            seconds = min(self.remaining(), task.test_timeout - (time.monotonic() - started))
+            if seconds <= 0:
+                raise ExecutionTimeout("hidden evaluation time limit exceeded")
+            return seconds
+
+        def decode(result):
+            if result.returncode or result.truncated:
+                raise SandboxError("trusted grading controller did not complete")
+            try:
+                return json.loads(result.output)
+            except (ValueError, RecursionError):
+                raise SandboxError("trusted grading controller returned invalid JSON") from None
+
+        try:
+            argv = task.test_commands[0]
+            plan = decode(controller._exec([*argv[:-1], "plan"], timeout=budget(), max_output=65536))
+            if not isinstance(plan, list) or not 1 <= len(plan) <= 100:
+                raise SandboxError("invalid grading operation plan")
+            observations, operations = [], []
+            for request in plan:
+                # Stderr is diagnostic only. There is no verdict channel in
+                # this container; raw stdout is just an untrusted JSON value.
+                result = self._exec(["timeout", "--signal=TERM", "--kill-after=1s", f"{budget():.2f}s",
+                                     "bash", "-c", "python3 -I -S /opt/swe-candidate.py 2>/tmp/operation.err"],
+                                    stdin=json.dumps(request).encode(), timeout=budget(), max_output=65536)
+                diagnostic = self._exec(["cat", "/tmp/operation.err"], timeout=budget(), max_output=8192)
+                error, response = None, None
+                if result.returncode or result.truncated:
+                    error = f"candidate operation exit={result.returncode}, truncated={result.truncated}"
+                else:
+                    try:
+                        response = json.loads(result.output)
+                    except (ValueError, RecursionError):
+                        error = "candidate operation returned malformed JSON"
+                operations.append(CommandResult(result.returncode, diagnostic.output + result.output,
+                                                result.truncated or diagnostic.truncated))
+                observations.append({"response": response, "error": error})
+            verdict = decode(controller._exec(argv, stdin=json.dumps(observations, allow_nan=False).encode(),
+                                              timeout=budget(), max_output=131072))
+            counts = ("cases_expected", "cases_observed", "assertions_expected", "assertions_executed",
+                      "assertions_passed", "execution_errors")
+            if (not isinstance(verdict, dict) or verdict.get("protocol") != "swe-eval-grading-v2"
+                    or any(type(verdict.get(key)) is not int or verdict[key] < 0 for key in counts)
+                    or type(verdict.get("passed")) is not bool
+                    or verdict["cases_expected"] != len(plan) or verdict["cases_observed"] != len(plan)):
+                raise SandboxError("invalid trusted assertion accounting")
+            verified = (verdict["execution_errors"] == 0 and verdict["assertions_expected"] > 0
+                        and verdict["assertions_executed"] == verdict["assertions_expected"]
+                        and verdict["assertions_passed"] == verdict["assertions_expected"])
+            if verdict["passed"] != verified:
+                raise SandboxError("inconsistent trusted assertion accounting")
+            return GradingResult(verdict, operations, controller.image_digest)
+        finally:
+            controller.close()
 
     def close(self):
         try:
@@ -204,7 +271,12 @@ def cleanup_containers(docker: str, service_id: str, run_id: str | None = None):
         ids = result.output.split()
         if ids:
             removal = run_process([docker, "rm", "--force", *ids], timeout=20, max_output=65536)
-            return removal.returncode == 0
+            if removal.returncode==0:return True
+            # Child shutdown can remove the same labelled container between ps
+            # and rm. Confirm absence with a fresh successful daemon query;
+            # never treat an unknown/unavailable daemon as cleaned.
+            remaining=run_process(args,timeout=10,max_output=65536)
+            return remaining.returncode==0 and not remaining.output.strip()
         return True
     except SandboxError:
         return False

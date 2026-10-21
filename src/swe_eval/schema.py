@@ -49,6 +49,8 @@ class ModelProfile(StrictModel):
     id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$")
     upstream_id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$")
     model_id: str = Field(min_length=1, max_length=200)
+    data_origin: Literal["live", "local_stub", "audit", "unverified"] = "unverified"
+    upstream_verified: bool = False
     base_url: str
     api_key_env: str | None = Field(default=None, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
     api_key_file: str | None = None
@@ -110,6 +112,7 @@ class Task(StrictModel):
     base_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
     issue: str = Field(min_length=1)
     test_commands: list[list[str]] = Field(min_length=1)
+    grading_protocol: Literal["isolated_operations_v2"] = "isolated_operations_v2"
     success_marker: str = Field(min_length=1)
     allowed_patch_paths: list[str] = Field(min_length=1)
     runtime: Runtime = Field(default_factory=Runtime)
@@ -135,6 +138,9 @@ class Metrics(StrictModel):
     patch_applied: bool | None = None
     test_result: Literal["not_run", "passed", "failed", "error", "timeout"] = "not_run"
     test_exit_codes: list[int] = Field(default_factory=list)
+    assertions_expected: int | None = None
+    assertions_executed: int | None = None
+    assertions_passed: int | None = None
     agent_steps: int = 0
     model_requests: int = 0
     input_tokens: int | None = None

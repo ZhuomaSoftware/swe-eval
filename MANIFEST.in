@@ -1,5 +1,5 @@
 include README.md VALIDATION.md pyproject.toml
-include compose.yaml compose.packaged.yaml
+include compose.yaml compose.packaged.yaml compose.dev.yaml
 include .env.example .dockerignore .gitignore
 include requirements-*.lock
 include config/models.json
@@ -16,3 +16,15 @@ prune .venv
 prune data
 prune dist
 prune build
+
+recursive-include src/swe_eval/static *
+recursive-include src/swe_eval/migrations *.sql
+recursive-include frontend *.json *.ts *.tsx *.css *.html
+prune frontend/node_modules
+prune frontend/test-results
+prune frontend/playwright-report
+include PHASE2_*.md
+include compose.center.yaml
+recursive-include deploy *.conf
+include config/sub2api.example.json
+include PHASE2_FINAL_FIX.patch

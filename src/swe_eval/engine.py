@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import time
 
 from .agent import MiniSWEAgent, verify_mini_api
@@ -11,6 +12,7 @@ from .sandbox import Cancelled, DockerSandbox, ExecutionTimeout, SandboxError
 from .schema import Metrics, RunState
 from .security import configure_logging
 from .service import model_snapshot, repository
+from .diagnostics import assertion_summary
 
 
 class EvaluationEngine:
@@ -21,6 +23,9 @@ class EvaluationEngine:
 
     def execute(self, run_id, *, supplied_patch: str | None = None):
         record = self.repo.get(run_id)
+        if record and record["task"].get("benchmark_type")=="official":
+            from .official_engine import OfficialEvaluationEngine
+            return OfficialEvaluationEngine(self.repo,self.benchmark,self.profiles,self.settings).execute(run_id,supplied_patch=supplied_patch)
         if not record or record["state"] != RunState.PREPARING:
             raise ValueError("only a claimed preparing run can execute")
         started = time.monotonic()
@@ -29,6 +34,7 @@ class EvaluationEngine:
         task = self.benchmark.get_task(record["task"]["id"])
         profile = self.profiles[record["model"]["id"]]
         duration = min(task.time_limit, profile.max_evaluation_duration)
+        final_state, final_error = RunState.COMPLETED, None
 
         def remaining():
             current = self.repo.get(run_id)
@@ -55,6 +61,15 @@ class EvaluationEngine:
                 raise ValueError("task configuration changed after submission; enqueue a new run")
             if model_snapshot(profile) != record["model"]:
                 raise ValueError("model configuration changed after submission; enqueue a new run")
+            if record.get('snapshot'):
+                effective = record['snapshot']['effective_model']
+                # Original configuration must still match; only server-validated
+                # effective limits/reasoning are loaded from the immutable snapshot.
+                profile = profile.model_copy(update={k: effective[k] for k in (
+                    'max_evaluation_duration','max_agent_steps','max_model_calls','max_output_tokens',
+                    'max_total_tokens','reasoning_effort')})
+                duration = min(task.time_limit, profile.max_evaluation_duration)
+                metrics.requested_reasoning_effort = profile.reasoning_effort
             if record["mode"] == "agent" and supplied_patch is not None:
                 raise ValueError("agent runs cannot accept supplied patches")
             if record["mode"] != "agent" and supplied_patch is None:
@@ -94,18 +109,21 @@ class EvaluationEngine:
                 metrics.resolved = False
                 log("patch_rejected", "Patch did not apply cleanly or changed disallowed paths/file modes")
             else:
-                log("tests_started", "Executing hidden regression commands in a fresh evaluator container")
+                log("tests_started", "Executing independent trusted assertions against isolated candidate operations")
                 try:
-                    results = evaluator.tests(task)
+                    grading = evaluator.tests(task)
+                    results, verdict = grading.operations, grading.verdict
                     metrics.test_exit_codes = [result.returncode for result in results]
                     for result in results:
-                        log("test_output", result.output + ("\n[truncated]" if result.truncated else ""))
-                    complete = len(results) == len(task.test_commands)
-                    marker = any(task.success_marker in result.output for result in results)
-                    passed = complete and marker and all(not r.returncode and not r.truncated for r in results)
-                    malformed = not results or any(r.truncated for r in results) or (
-                        all(not r.returncode for r in results) and not marker) or any(
-                            r.returncode in {125, 126, 127} for r in results)
+                        log("test_operation", json.dumps({"exit_code": result.returncode, "truncated": result.truncated}))
+                    log("trusted_assertions", json.dumps(assertion_summary(verdict)))
+                    metrics.execution_metadata["controller_image_digest"] = grading.controller_image_digest
+                    metrics.execution_metadata["grading_protocol"] = verdict["protocol"]
+                    metrics.assertions_expected = verdict["assertions_expected"]
+                    metrics.assertions_executed = verdict["assertions_executed"]
+                    metrics.assertions_passed = verdict["assertions_passed"]
+                    passed = verdict["passed"]
+                    malformed = verdict["execution_errors"] > 0
                     metrics.test_result = "passed" if passed else "error" if malformed else "failed"
                     metrics.resolved = passed
                     if malformed:
@@ -120,14 +138,12 @@ class EvaluationEngine:
                     metrics.test_execution_errors += 1
                     raise
             remaining()
-            persist()
-            self.repo.transition(run_id, RunState.COMPLETED)
         except Cancelled:
             metrics.resolved = None
-            self.repo.transition(run_id, RunState.CANCELLED, "evaluation_cancelled")
+            final_state, final_error = RunState.CANCELLED, "evaluation_cancelled"
         except ExecutionTimeout:
-            metrics.resolved = False if metrics.test_result == "timeout" else None
-            self.repo.transition(run_id, RunState.TIMEOUT, "evaluation_time_limit_exceeded")
+            metrics.resolved = None
+            final_state, final_error = RunState.TIMEOUT, "evaluation_time_limit_exceeded"
         except Exception as error:
             metrics.resolved = None
             # Only known service-generated messages can be persisted. Do not emit tracebacks
@@ -136,13 +152,16 @@ class EvaluationEngine:
                 message = str(error)
             else:
                 message = "evaluation infrastructure error"
-            self.repo.transition(run_id, RunState.FAILED, f"{type(error).__name__}: {message}")
+            final_state, final_error = RunState.FAILED, f"{type(error).__name__}: {message}"
         finally:
             if agent_sandbox:
                 agent_sandbox.close()
             if evaluator:
                 evaluator.close()
-            persist()
+            metrics.wall_seconds = round(time.monotonic() - started, 4)
+            # Verdict + terminal state commit together. A stale child cannot
+            # mutate a row finalized by recovery or a supervisor.
+            self.repo.transition(run_id, final_state, final_error, metrics=metrics)
         return self.repo.get(run_id)
 
 
@@ -153,5 +172,6 @@ def execute_run(settings: Settings, run_id: str, supplied_patch: str | None = No
     os.environ["MSWEA_GLOBAL_CONFIG_DIR"] = str(settings.data_dir / "mini-config")
     profiles = load_models(settings.models_file)
     repo = repository(settings, worker=True)
-    engine = EvaluationEngine(repo, LocalBenchmark(settings.task_dir), profiles, settings)
+    from .benchmarks.official import TaskRegistry
+    engine = EvaluationEngine(repo, TaskRegistry(settings), profiles, settings)
     engine.execute(run_id, supplied_patch=supplied_patch)

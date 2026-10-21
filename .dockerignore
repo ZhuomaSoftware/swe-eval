@@ -2,6 +2,15 @@
 .venv
 .env
 data
-__pycache__
-*.egg-info
+**/__pycache__
+**/*.pyc
+**/*.egg-info
 models.local.json
+dist
+build
+
+frontend/node_modules
+frontend/test-results
+frontend/playwright-report
+# Always use the frontend build stage, never merge stale host-generated assets.
+src/swe_eval/static

@@ -151,7 +151,13 @@ class MiniSWEAgent:
                             instance_template="{{ task }}", step_limit=profile.max_model_calls,
                             wall_time_limit_seconds=max(1, int(remaining())), cost_limit=0,
                             max_consecutive_format_errors=3, output_path=None)
+        official=getattr(task,"benchmark_type",None)=="official"
+        policy=("All repository source paths are allowed, but do not change tests, test runner or build configuration, .git, symlinks, or grading files.\n" if official else "Only these repository paths may be changed in the submitted patch:\n"+"\n".join(f"- {path}" for path in task.allowed_patch_paths)+"\n")
         result = agent.run(task=f"Issue:\n{task.issue}\n\nBase commit: {task.base_commit}\n"
+                                "Patch constraints (required):\n"
+                                + policy +
+                                "Do not change or add other paths. You may inspect and run existing tests; "
+                                "leave files outside the allowed paths unchanged before submitting.\n\n"
                                 f"Repository context (tracked files and README):\n{context.output[:16000]}\n\n"
                                 "Begin by inspecting the repository.")
         # Only a safe summary enters persistence; raw trajectories can contain upstream data.

@@ -27,9 +27,13 @@ def repository(settings: Settings, *, worker=False):
     return repo
 
 
-def enqueue(repo, benchmark, profiles, task_id, profile_id, *, mode="agent", parent_id=None):
+def enqueue(repo, benchmark, profiles, task_id, profile_id, *, mode="agent", parent_id=None, max_pending=None):
     task, profile = benchmark.get_task(task_id), profiles[profile_id]
-    return repo.create(task.model_dump(mode="json"), model_snapshot(profile), mode=mode, parent_id=parent_id)
+    if getattr(task,"benchmark_type",None)=="official" and not task.environment_ready:
+        raise ValueError("official task must pass environment, gold and negative validation before execution")
+    from .center import snapshot
+    return repo.create(task.model_dump(mode="json"), model_snapshot(profile), mode=mode, parent_id=parent_id,
+                       snapshot=snapshot(task, profile), max_pending=max_pending)
 
 
 def public_run(record):
@@ -39,4 +43,6 @@ def public_run(record):
     task.pop("test_commands", None)
     task.pop("success_marker", None)
     value["task"] = task
+    from .diagnostics import public_metadata
+    value["metrics"] = dict(value["metrics"], execution_metadata=public_metadata(value["metrics"].get("execution_metadata", {})))
     return value

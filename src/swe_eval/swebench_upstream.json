@@ -1,0 +1,15 @@
+{
+  "commit": "02e7a74ffd0b707aab73d203fe87bdc7c76afc8e",
+  "version": "5.0.2",
+  "files": {
+    "__init__.py": "39f6961d946aefd41c0ceb23ea4f910e5c3cf4a28a415efc1d9fd958f96efd8c",
+    "types.py": "558b6e7193306c304f9847a8a83dcab6a03ee333f6d51e61152e8821f89e0725",
+    "harness/run_evaluation.py": "04b5dab584fbe62ae9d1ff025edf52d714e584102d587c7e647805d1efb37d84",
+    "harness/grading.py": "a095273010175001a6779e365b3b77abb8657c7ac2e4f80b4bc360faa6f09483",
+    "harness/utils.py": "c22f38fdd4ffd34301da7f837b82926cf261d81ca0387d92dd2990b393517c79",
+    "harness/infra_failure.py": "72eaca5e8f76390ff9ac1d2d606f5390820b88efe6eed56efed8ff520c593eac",
+    "harness/docker_utils.py": "f1c3941d24580df56a8e2346df86d34e658319b9a70d4d05c504504b541d431e",
+    "harness/constants/__init__.py": "8895ab5313d874349c4b07bd223bb9eb00acaee377b432e67cc7ad840341e79b",
+    "harness/log_parsers/python.py": "cd56156414f8327221e525665ace9b184f7d73e83b272d9eb3f545fb17c2d9bc"
+  }
+}

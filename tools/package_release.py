@@ -25,11 +25,14 @@ DATA_FILES = (
 )
 DEPLOY_FILES = (
     "README.md", "VALIDATION.md", "pyproject.toml", "MANIFEST.in",
-    "compose.yaml", "compose.packaged.yaml", ".env.example", ".dockerignore", ".gitignore",
+    "compose.yaml", "compose.packaged.yaml", "compose.dev.yaml", ".env.example", ".dockerignore", ".gitignore",
     "requirements-core.lock", "requirements-agent.lock", "requirements-test.lock", "requirements-build.lock",
     "config/models.json",
     "docker/service.Dockerfile", "docker/sandbox.Dockerfile", "docker/grader.Dockerfile",
-    "tools/package_release.py",
+    "tools/package_release.py", "tools/center_smoke.py", "tests/support/model_stub.py", "compose.center.yaml",
+    "PHASE2_FINAL_FIX.patch", "PHASE2_ARCHITECTURE.md", "PHASE2_IMPLEMENTATION_REPORT.md", "PHASE2_ACCEPTANCE_REPORT.md", "PHASE2_DEPLOYMENT_GUIDE.md",
+    "frontend/package.json", "frontend/package-lock.json", "frontend/index.html", "frontend/tsconfig.json", "frontend/vite.config.ts", "frontend/playwright.config.ts", "frontend/e2e/dashboard.spec.ts", "docker/browser-tests.Dockerfile",
+    "deploy/nginx-center.conf", "config/sub2api.example.json",
 )
 FORBIDDEN = {".git", ".venv", ".env", "models.local.json", "__pycache__"}
 
@@ -83,6 +86,7 @@ def deployment_archive(directory: Path, project: dict):
     destination = directory / f"{prefix}-deploy.tar.gz"
     timestamp = int(os.getenv("SOURCE_DATE_EPOCH", "0"))
     files = [ROOT / name for name in DEPLOY_FILES]
+    files.extend(sorted((ROOT / "frontend/src").glob("*")))
     for path in sorted((ROOT / "src/swe_eval").rglob("*")):
         if path.is_symlink():
             raise ValueError("symlinks are not permitted in deployment source")

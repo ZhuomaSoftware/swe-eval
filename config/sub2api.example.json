@@ -1,0 +1,1 @@
+{"source_id":"gateway-staging","base_url":"https://gateway.example.com","admin_key_env":"SUB2API_METADATA_ADMIN_KEY","mappings":[{"profile_id":"gateway-primary","group_id":1,"upstream_source_id":"manual-group-1","fixed_upstream_verified":false}]}

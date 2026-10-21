@@ -1,0 +1,43 @@
+name: swe-phase26-staging
+services:
+  api:
+    image: swe-eval-api:phase26
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:size=128m,nosuid,nodev]
+    ports: ["127.0.0.1:18326:8000"]
+    environment:
+      SWE_DATA_DIR: /data
+      SWE_MODELS_FILE: /config/models.json
+      SWE_TASK_DIR: /config/tasks
+      SWE_ADMIN_TOKEN: ${SWE_ADMIN_TOKEN:?Set an isolated administrator token}
+      SWE_UI_PASSWORD_HASH: ${SWE_UI_PASSWORD_HASH:?Set an isolated password hash}
+      SWE_PUBLIC_ORIGIN: http://127.0.0.1:18326
+      SWE_COOKIE_SECURE: "false"
+    volumes:
+      - swebench-data:/data
+      - ${SWE_MODELS_FILE:?Provide server-side profiles}:/config/models.json:ro
+      - ${SWE_TASK_DIR:?Provide server-owned local task manifests}:/config/tasks:ro
+  worker:
+    image: swe-eval-worker:phase26
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    group_add: ["0"]
+    tmpfs: [/tmp:size=256m,nosuid,nodev]
+    stop_grace_period: 15s
+    environment:
+      SWE_DATA_DIR: /data
+      SWE_MODELS_FILE: /config/models.json
+      SWE_TASK_DIR: /config/tasks
+      SWE_RESOURCE_PROBE_IMAGE: swe-eval-worker:phase26
+      MSWEA_GLOBAL_CONFIG_DIR: /tmp/mini-config
+    volumes:
+      - swebench-data:/data
+      - ${SWE_MODELS_FILE:?Provide server-side profiles}:/config/models.json:ro
+      - ${SWE_TASK_DIR:?Provide server-owned local task manifests}:/config/tasks:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+volumes:
+  swebench-data:

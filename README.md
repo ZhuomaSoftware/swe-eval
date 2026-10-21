@@ -10,12 +10,14 @@ An evaluation captures a real Git diff, applies it to a second clean repository,
 and executes hidden regression tests. Model text, an HTTP 200, and an agent's
 `SUBMIT` response cannot establish resolution.
 
-**Validation status:** the implementation and offline tests are present. This
-development environment has no Docker, FastAPI, HTTPX, or mini-SWE-agent, and its
-shell cannot access package indexes. Consequently API startup, the installed mini
-API, Docker execution, and live inference have **not** been verified here. See
-[VALIDATION.md](VALIDATION.md) for executed checks and the remaining release gates.
-No model benchmark score is claimed.
+**Validation status:** all 55 tests pass in the local ARM64 Docker development
+environment, including installed-mini/API tests and real sandbox execution.
+The known repair passes all nine hidden tests; unchanged code fails. GitHub CI
+also validated the packaged worker on AMD64. A live `gpt-6-astra` run through a
+user-configured gateway repaired the fixture and passed all nine hidden tests
+after a prompt-policy correction; the original rejected attempt is preserved.
+See [VALIDATION.md](VALIDATION.md) for both results. This validates one fixture's
+workflow and does not establish an aggregate model benchmark score.
 
 ## Quick start with Docker Compose
 
@@ -102,6 +104,67 @@ curl --fail -H "Authorization: Bearer $SWE_ADMIN_TOKEN" "http://127.0.0.1:8000/a
 `metrics.test_result` for the result. A failed regression suite is a completed,
 unresolved run. Infrastructure failure is `failed`; no verdict is invented.
 
+## Full local Docker development
+
+Docker Desktop can run the API, worker, database, and all tests without a host
+Python virtualenv. On macOS, if `docker` is missing from your terminal PATH:
+
+```bash
+export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"
+```
+
+Create `.env` and its administrator token as described above. Copy the model
+examples into the ignored local configuration:
+
+```bash
+cp config/models.json models.local.json
+```
+
+Set these values in `.env` to enable the development override and local worker:
+
+```dotenv
+SWE_MODELS_FILE=./models.local.json
+COMPOSE_FILE=compose.yaml:compose.dev.yaml
+COMPOSE_PROFILES=local-worker
+```
+
+Then build and start everything:
+
+```bash
+docker build -t swe-eval-sandbox:phase1 -f docker/sandbox.Dockerfile .
+docker build -t swe-eval-grader:phase1 -f docker/grader.Dockerfile .
+docker compose build
+# Verification takes the single-worker lease; stop an existing worker first.
+docker compose stop worker
+docker compose run --rm worker swe-eval verify-fixture
+docker compose up -d
+curl --fail http://127.0.0.1:8000/health
+docker compose exec worker swe-eval doctor
+```
+
+[`compose.dev.yaml`](compose.dev.yaml) mounts service source read-only and reloads
+the API when Python source changes. Worker changes take effect with
+`docker compose restart worker` after active runs finish. The development worker
+also includes the pinned API test dependencies and Git for the temporary Git
+unit tests. Run the complete suite, including actual Docker execution:
+
+```bash
+docker compose run --rm -e SWE_DOCKER_TESTS=1 worker \
+  python -m unittest discover -s /app/tests -v
+```
+
+Use `docker compose logs -f api worker` for logs and `docker compose down` to stop
+the environment. Results remain in the named volume; `down -v` deletes them.
+Neither model credentials nor a frontend are required for the fixture check.
+
+For a live evaluation, edit `models.local.json` with your actual base URL/model
+and put the referenced API key in `.env`. If the gateway runs on this Mac, use
+`host.docker.internal` instead of `localhost` in its URL; plain HTTP additionally
+requires `"allow_http": true` in that model profile. Recreate both services after
+configuration changes with `docker compose up -d --force-recreate`, then submit
+the authenticated API request shown above. Keep this configuration local; only
+the dedicated worker receives the gateway keys and Docker socket.
+
 ## Local Python development and CLI
 
 Use Python 3.11 or newer, with Docker running. The Python service itself does not
@@ -152,9 +215,28 @@ imports without its unrelated LiteLLM, dataset, and interactive CLI stack. Our
 own provider and sandbox implement mini's protocols. Mini's unused tools are
 unsupported in this lean environment, and `pip check` will report its unused
 declared dependencies. Conventional `pip install '.[agent,test]'` installs that
-larger upstream dependency graph instead, without a transitive lock. The lean
-pins and Docker builds still need verification in a network-enabled environment;
-they are not hash-locked. Base-image tags and Debian apt inputs are not immutable
+larger upstream dependency graph instead, without a transitive lock.
+
+The supported release uses **option B: an audited reduced import closure**.
+Exactly these upstream requirements are omitted: `datasets`, `litellm`, `openai`,
+`prompt-toolkit`, `pyyaml`, `requests`, `tenacity`, `textual`, and `typer`.
+Only `DefaultAgent` plus this service's model/environment adapters are supported;
+upstream mini CLIs, UI, dataset loading, LiteLLM/OpenAI adapters, retry utilities,
+and their configuration loaders are unsupported. Installing the complete graph
+would bring unrelated dataset, provider and interactive stacks into the
+worker. Keeping the existing bounded service path avoids that overhead.
+
+```bash
+python -m pip check  # Expected exit 1: those nine missing requirements
+python -m swe_eval.dependency_check --lean-agent
+# Exit 0 only for the exact exception AND the supported installed mini API.
+# Output explicitly says pip_check=FAILED_EXPECTED; any drift fails the gate.
+```
+
+Docker builds and both CI workflows enforce this exception gate. Tests also run
+the actual installed DefaultAgent with both action formats. The lean
+pins and Docker builds are exercised in CI; they are not hash-locked. Base-image
+tags and Debian apt inputs are not immutable
 digest/snapshot pins; record and pin their digests before a production release.
 
 ## Build and package workflow
@@ -325,13 +407,20 @@ tests/                   offline, API, and opt-in real Docker integration tests
 5. Worker captures a binary-capable Git patch, including new files, and destroys
    the coding container. Step/call/format budgets can leave a partial patch, which
    is still independently graded; an agent submission is not itself a verdict.
-6. `evaluating`: a new grader container prepares the original base, checks/applies
-   the patch, and validates changed paths and file modes. Disallowed or malformed
-   patches produce an unresolved result without running tests.
-7. Trusted commands run with per-test timeouts. All configured commands must
-   finish successfully and emit the trusted harness's completion marker. The
-   fixture grader verifies nine actual tests ran without skips; exit 0 with no
-   marker is an error. Failed assertions are unresolved.
+6. `evaluating`: a new **candidate** container, using the coding image without
+   hidden files, prepares the original base, checks/applies the patch, and
+   validates changed paths and file modes. Invalid patches remain unresolved.
+7. A third, trusted **controller** container receives no candidate source or
+   workspace. It supplies nine operation inputs through the trusted worker;
+   isolated candidate Python returns untrusted JSON operation values. The
+   controller checks all nine original regressions (ten assertions including
+   input preservation), counts actual assertions, and returns its verdict.
+   Expected answers, hidden files, and controller state never enter a candidate
+   container. Candidate stdout, exit codes, exceptions, signals and fake markers
+   cannot authorize success. Missing/malformed operations are execution errors;
+   valid operations with incorrect values fail assertions. The test deadline
+   covers all operations together. The old `success_marker` field is retained
+   for manifest compatibility and is **never used to determine a verdict**.
 8. Worker stores test results, metrics, safe logs, patch, image digests, and final
    state. No raw provider request/response headers or key-bearing trajectories
    are persisted.
@@ -341,14 +430,13 @@ constructor, configuration fields, and methods before execution and refuses an
 unsupported installation. The adapter follows the tagged upstream
 [DefaultAgent](https://github.com/SWE-agent/mini-swe-agent/blob/v2.4.6/src/minisweagent/agents/default.py)
 and [model/environment protocols](https://github.com/SWE-agent/mini-swe-agent/blob/v2.4.6/src/minisweagent/__init__.py).
-This runtime check is implemented; it was not executed successfully here because
-the package could not be installed.
+The installed API contract check passes in local Docker development and CI.
 
 ## Task format and fixture
 
 [`task.json`](src/swe_eval/benchmarks/data/intervals/task.json) defines:
 task ID, benchmark/version, repository source, exact base commit, issue,
-test command argv arrays, expected completion marker, permitted patch paths,
+trusted controller command argv, `isolated_operations_v2` grading protocol, permitted patch paths,
 runtime/image requirements, resource limits, and timeouts. Only administrator
 installed manifests are loaded; there is no API to accept repositories, patches,
 test commands, images, or URLs from clients.
@@ -365,13 +453,17 @@ The local adapter supports:
 
 The `intervals-001` repository has a real endpoint-overlap bug in `merge_ranges`.
 The coding container receives only `repository/` with buggy source, README, and
-two public smoke tests. The separate grader image includes nine regressions.
+two public smoke tests. The separate controller image includes nine regressions
+with ten assertions; candidate execution cannot read it.
 `known_good.patch` changes `<` to `<=`; unchanged source fails touching-endpoint
 and related cases. The known repair and hidden files are never copied to the
 agent container.
 
 To add a private local task, install a manifest/source beneath `SWE_TASK_DIR`,
-build its trusted agent/grader images, and set the manifest image names. Keep
+build its candidate/controller images and implement the isolated operation
+protocol for that task, then set the manifest image names. The current operation
+runner supports only this interval fixture; arbitrary test commands and external
+benchmark harnesses are not claimed compatible. Keep
 hidden files out of the agent build context layers. The `BenchmarkAdapter`
 protocol is the extension point; **SWE-bench Verified and SWE-bench Pro adapters
 are not implemented or claimed compatible**.
@@ -407,7 +499,7 @@ are never automatically retried. Retry creates a new ID with `parent_id`.
 The parent supervises each run in a spawned Python process and enforces an
 absolute wall-clock deadline even if inference or an agent command hangs.
 Cancellation is observed approximately every 0.2 seconds, then the child is
-terminated and both containers are forcibly removed. Cleanup may take additional
+terminated and all run containers are forcibly removed. Cleanup may take additional
 seconds; a failing/unreachable Docker daemon is an operator incident and stops
 further worker scheduling. Stopping the worker cancels an active run.
 
@@ -444,9 +536,10 @@ score, leaderboard, or router modification is implemented in Phase 1.
 - Sandboxes have no host bind mounts, named volumes, Docker socket, host home,
   service database, `.env`, provider key, or production credential. Repository
   source is streamed through stdin. Images must be prebuilt (`--pull=never`).
-- Hidden tests are root-owned in the grader's read-only image. The agent uses a
-  different image/container and cannot access them. The grader is discarded after
-  every evaluation; no agent process survives into grading.
+- Hidden tests are root-owned in a separate controller image. Neither coding
+  nor evaluation candidates use that image. The controller has its own PID/IPC,
+  mount and network namespaces, no mounts, and no candidate workspace. All three
+  containers are discarded; no coding process survives into evaluation.
 - Provider calls happen in the trusted worker. HTTPS is verified; redirects and
   implicit environment proxies are disabled. Exceptions omit HTTP bodies/headers.
   Known configured secrets and credential patterns are redacted from logs.
@@ -463,12 +556,12 @@ score, leaderboard, or router modification is implemented in Phase 1.
 - Docker shares the host kernel and does not guarantee protection from container
   escapes, all side channels, or malicious kernel exploits. CPU timeouts are not
   a substitute for a hardened daemon/host. A daemon outage can prevent cleanup.
-- The fixture grader resists missing/zero/skipped tests and basic path/config
-  hijacking, but tests ultimately import candidate Python. Deliberately adversarial
-  code can attempt to tamper with in-process test machinery or forge output.
-  This MVP is restricted to trusted predefined tasks; it is not a formally
-  tamper-proof grading system. Stronger out-of-process, independently authenticated
-  grading is a next step before adversarial public workloads.
+- The trusted controller evaluates untrusted JSON primitives from candidate
+  operations, not candidate-generated verdicts. It never imports candidate code.
+  Like any finite functional suite it cannot prove correctness for unseen inputs
+  or distinguish an equivalent operation implementation from hardcoded correct
+  behavior. Kernel escapes and side channels remain outside the tested boundary.
+  The service remains restricted to trusted, predefined tasks.
 - Stored patches/logs may contain private benchmark source; protect the SQLite
   directory and backups. There is no artifact retention quota/automatic deletion,
   multi-tenant authorization, public signup, or arbitrary repository execution.
@@ -481,8 +574,9 @@ SWE_DOCKER_TESTS=1 python -m unittest discover -s tests -v
 swe-eval verify-fixture
 ```
 
-The first command runs offline core and API tests when dependencies are installed;
-missing API dependencies produce explicit skips. The second enables real Docker
+Install the pinned core, agent, and test dependencies before running the suite;
+the remediation tests require them and fail explicitly if they are missing.
+The second command enables real Docker
 tests (both images must exist): hidden-test separation, valid/unchanged repairs,
 disallowed patches, rejection of a zero exit without tests, and an actual installed mini agent inspecting/editing the
 container using scripted inference responses. Scripted responses are a test
@@ -490,13 +584,53 @@ transport only and are never a production provider or benchmark score.
 
 CI in [`.github/workflows/test.yml`](.github/workflows/test.yml) installs the lean
 pins, builds images, enables Docker tests, and runs the fixture demonstration.
-CI has not been run from this workspace. Before release, run those gates and then
+Hosted CI has not been triggered for this remediation. Before release, run those gates and then
 one real gateway evaluation; inspect patch, hidden-test output, usage, endpoint
 identity, and restart persistence. A live model test additionally needs valid
 gateway credentials. Do not replace blocked Docker checks with host execution.
 
-Next: verify these release gates, pin image/package artifacts by digest/hash,
-harden grading for adversarial candidates, then add a real external benchmark
+Next: pin image/package artifacts by digest/hash, then add a real external benchmark
 adapter and PostgreSQL repository when needed. Sub2api dashboard integration,
 model synchronization, gpt-auto routing changes, distributed scheduling, and
 public leaderboards remain outside this phase.
+
+## Phase 1.5 grading integrity and recovery checks
+
+```bash
+# After the pinned virtualenv install and both sandbox/controller builds:
+SWE_DOCKER_TESTS=1 python -m unittest discover -s tests -p test_remediation.py -v
+# Exact original F-01 attack (requires tests on the import path):
+PYTHONPATH=tests SWE_DOCKER_TESTS=1 python -m unittest \
+  test_remediation.GradingIntegrityTests.test_original_f01_exploit -v
+```
+
+Terminal state and verdict are committed atomically. A completed successful
+repair is true, a completed failed assertion or rejected patch is false, and
+failed/interrupted/timed-out/cancelled runs have null resolution. Recovery keeps
+usage and observed test diagnostics while removing incomplete verdict authority.
+Terminal results are immutable; expired leases and stale metric/patch/state
+writes are rejected. Retries create new child identities. Legacy stored results
+are not regraded or silently rewritten: results produced by the old marker-based
+grader must not be treated as integrity-verified. Use fresh corrected runs.
+
+## Phase 2 SWE Evaluation Center
+
+Version 0.2.0 adds an independent Chinese administration dashboard, durable
+bounded batch experiments, provenance-aware comparisons, server-side read-only
+sub2api metadata mapping and an authenticated informational shadow-router export.
+The accepted grading-v2 candidate/controller boundary remains in place.
+
+Start with [Phase 2 deployment](PHASE2_DEPLOYMENT_GUIDE.md),
+[architecture](PHASE2_ARCHITECTURE.md), [implementation](PHASE2_IMPLEMENTATION_REPORT.md)
+and [acceptance evidence](PHASE2_ACCEPTANCE_REPORT.md). The frontend uses React,
+TypeScript and Vite: `cd frontend && npm ci && npm test && npm run build`.
+Docker service builds include assets automatically. Use a separate console
+password hash; the browser never needs the API administrator bearer token.
+
+Do not edit a checkout bind-mounted into an existing auto-reloading service while
+expecting deployment isolation. Inspect mounts and reload configuration first;
+use a separate checkout/build context. The Phase 2 audit records an unintended
+reload/schema initialization in the pre-existing development service caused by
+missing that baseline check. No sub2api service or routing configuration was
+changed. Live sub2api federation/metadata integration remains explicitly blocked
+pending an authorized compatible staging environment.

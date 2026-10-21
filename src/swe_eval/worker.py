@@ -44,16 +44,23 @@ class Worker:
         if not self.repo.acquire(self.owner, self.settings.lease_seconds):
             raise Conflict("another worker holds the single-worker lease")
         # Recover only after the previous lease expires. Never silently repeat a paid run.
+        self.repo.event("worker_starting", "Lease acquired; recovery and cleanup in progress")
+        cleanup_started = time.monotonic()
+        self.repo.event("cleanup_started", "Startup orphan cleanup in progress")
         interrupted = self.repo.recover(self.owner)
         if not cleanup_containers(self.settings.docker_bin, self.repo.service_id):
+            self.repo.event("cleanup_failed", "Startup orphan cleanup failed")
             self.repo.release(self.owner)
             raise RuntimeError("Docker unavailable or orphan cleanup failed; worker refuses to start")
+        self.repo.event("cleanup_complete", f"Startup cleanup finished in {time.monotonic()-cleanup_started:.3f}s")
+        self.repo.event("worker_ready", f"Docker cleanup complete in {time.monotonic()-cleanup_started:.3f}s; recovered {len(interrupted)} runs")
         if interrupted:
             logger.info("Recovered %d interrupted evaluations as failed", len(interrupted))
 
     def supervise(self, record, *, supplied_patch=None):
         run_id = record["id"]
-        limit = min(record["task"]["time_limit"], record["model"]["max_evaluation_duration"])
+        effective = (record.get("snapshot") or {}).get("effective_model", record["model"])
+        limit = min(record["task"]["time_limit"], effective["max_evaluation_duration"])
         process = multiprocessing.get_context("spawn").Process(
             target=execute_run, args=(self.settings, run_id, supplied_patch), daemon=False)
         process.start()
@@ -69,6 +76,7 @@ class Worker:
                         final_state, error = RunState.FAILED, "worker_lease_lost"
                         break
                     last_heartbeat = now
+                self.repo.reconcile_batches()
                 current = self.repo.get(run_id)
                 if self.stop.is_set() or current["cancel_requested"]:
                     final_state, error = RunState.CANCELLED, "evaluation_cancelled"
@@ -80,19 +88,28 @@ class Worker:
         finally:
             terminate_child(process)
             # A worker crash or timeout must not leave the daemon running generated code.
+            self.repo.event("cleanup_started", "Run container cleanup in progress")
             cleaned = cleanup_containers(self.settings.docker_bin, self.repo.service_id, run_id)
             current = self.repo.get(run_id)
-            if current["state"] in ACTIVE:
-                self.repo.transition(run_id, final_state or RunState.FAILED, error or "worker_child_interrupted")
+            if current["state"] in ACTIVE and not lease_lost:
+                metrics = Metrics.model_validate(current["metrics"])
+                metrics.wall_seconds = round(time.monotonic() - started, 4)
+                try:
+                    self.repo.transition(run_id, final_state or RunState.FAILED,
+                                         error or "worker_child_interrupted", metrics=metrics)
+                except Conflict:
+                    # Another lease owner recovered the run after our last
+                    # heartbeat. Its terminal record is authoritative.
+                    if self.repo.heartbeat(self.owner, self.settings.lease_seconds):
+                        raise
+                    lease_lost = True
+            if cleaned:
+                self.repo.event("cleanup_complete", "Run container cleanup finished")
             if not cleaned:
+                self.repo.event("cleanup_failed", "Run container cleanup failed")
                 logger.error("Container cleanup failed; stopping worker")
                 self.stop.set()
                 self.repo.log(run_id, "cleanup_error", "Daemon cleanup failed; operator intervention required")
-            metrics = Metrics.model_validate(self.repo.get(run_id)["metrics"])
-            if self.repo.get(run_id)["state"] in {"failed", "cancelled", "timeout"}:
-                metrics.resolved = None
-            metrics.wall_seconds = round(time.monotonic() - started, 4)
-            self.repo.save_metrics(run_id, metrics)
         if lease_lost:
             raise Conflict("worker lease was lost; worker stopped")
         return self.repo.get(run_id)

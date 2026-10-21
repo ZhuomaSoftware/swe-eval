@@ -33,6 +33,11 @@ class DockerPipelineTests(unittest.TestCase):
         self.repo.initialize()
         self.assertTrue(self.repo.acquire("test-worker", 300))
         self.benchmark = LocalBenchmark()
+        # Audit images can be exercised without retagging images used by an
+        # already-running service. Defaults retain the documented local tags.
+        task = self.benchmark.get_task("intervals-001")
+        task.runtime.agent_image = os.getenv("SWE_TEST_AGENT_IMAGE", task.runtime.agent_image)
+        task.runtime.evaluator_image = os.getenv("SWE_TEST_GRADER_IMAGE", task.runtime.evaluator_image)
         self.profile = profile(api_key_env=None, allow_no_api_key=True)
         self.settings = Settings(root / "data", root / "unused.json")
 
@@ -88,6 +93,13 @@ class DockerPipelineTests(unittest.TestCase):
         self.assertEqual(result["metrics"]["agent_steps"], 2)
         self.assertIn("Repository context", requests[0]["messages"][1]["content"])
         self.assertIn("intervals.py", requests[0]["messages"][1]["content"])
+        # The first live model repair changed public tests because this policy
+        # was absent from the prompt, causing a correct source fix to be rejected.
+        prompt = requests[0]["messages"][1]["content"]
+        constraints = prompt.split("Patch constraints (required):", 1)[1].split("Repository context", 1)[0]
+        self.assertIn("- intervals.py", constraints)
+        self.assertNotIn("- test_public.py", constraints)
+        self.assertNotIn("/opt/hidden", prompt)
         self.assertIn("+        if merged and start <=", self.repo.patch(record["id"]))
 
     def test_disallowed_patch_is_not_tested(self):

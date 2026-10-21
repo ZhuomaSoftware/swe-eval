@@ -1,0 +1,31 @@
+{
+  "schema_version": "swe-curated-subset-v1",
+  "dataset": "SWE-bench/SWE-bench_Verified",
+  "dataset_revision": "78f471bf655a3137b2e8a75af1501690ec009ec3",
+  "name": "curated-20-v1",
+  "label": "SWE-bench Verified \u2014 Internal 20-Instance Subset",
+  "manifest_hash": "bca369a9dc0d61df6398a72ea0042b6f89c7f23a66758c8fd444e84574accf89",
+  "selection_rule": "Five lexicographically first IDs per sympy/sympy, pytest-dev/pytest, sphinx-doc/sphinx, psf/requests; sympy__sympy-20590 anchored before SymPy sorting. No claim of statistical representativeness.",
+  "instance_ids": [
+    "sympy__sympy-20590",
+    "sympy__sympy-11618",
+    "sympy__sympy-12096",
+    "sympy__sympy-12419",
+    "sympy__sympy-12481",
+    "pytest-dev__pytest-10051",
+    "pytest-dev__pytest-10081",
+    "pytest-dev__pytest-10356",
+    "pytest-dev__pytest-5262",
+    "pytest-dev__pytest-5631",
+    "sphinx-doc__sphinx-10323",
+    "sphinx-doc__sphinx-10435",
+    "sphinx-doc__sphinx-10449",
+    "sphinx-doc__sphinx-10466",
+    "sphinx-doc__sphinx-10614",
+    "psf__requests-1142",
+    "psf__requests-1724",
+    "psf__requests-1766",
+    "psf__requests-1921",
+    "psf__requests-2317"
+  ]
+}
