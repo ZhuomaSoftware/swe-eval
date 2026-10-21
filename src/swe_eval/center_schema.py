@@ -12,6 +12,8 @@ class RunLimits(StrictModel):
 
 
 class BatchSubmission(StrictModel):
+    subset_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$")
+    subset_revision: int | None = Field(default=None, ge=1)
     name: str = Field(min_length=1, max_length=120)
     task_ids: list[str] = Field(min_length=1, max_length=100)
     model_profile_ids: list[str] = Field(min_length=1, max_length=30)
@@ -25,6 +27,7 @@ class BatchSubmission(StrictModel):
 
     @model_validator(mode='after')
     def unique(self):
+        if bool(self.subset_id) != bool(self.subset_revision):raise ValueError("subset ID and revision must be supplied together")
         if len(set(self.task_ids)) != len(self.task_ids) or len(set(self.model_profile_ids)) != len(self.model_profile_ids):
             raise ValueError('task and profile selections must be unique')
         if set(self.reasoning) - set(self.model_profile_ids):

@@ -1,0 +1,16 @@
+BEGIN IMMEDIATE;
+CREATE TABLE managed_providers(id TEXT PRIMARY KEY,current_revision INTEGER NOT NULL,created_at REAL NOT NULL,updated_at REAL NOT NULL);
+CREATE TABLE provider_revisions(provider_id TEXT NOT NULL REFERENCES managed_providers(id),revision INTEGER NOT NULL,payload_json TEXT NOT NULL,created_at REAL NOT NULL,PRIMARY KEY(provider_id,revision));
+CREATE TABLE provider_credentials(provider_id TEXT NOT NULL REFERENCES managed_providers(id),version INTEGER NOT NULL,sealed BLOB NOT NULL,key_id TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0,created_at REAL NOT NULL,PRIMARY KEY(provider_id,version));
+CREATE TABLE managed_models(id TEXT PRIMARY KEY,current_revision INTEGER NOT NULL,created_at REAL NOT NULL,updated_at REAL NOT NULL);
+CREATE TABLE model_revisions(model_id TEXT NOT NULL REFERENCES managed_models(id),revision INTEGER NOT NULL,payload_json TEXT NOT NULL,created_at REAL NOT NULL,PRIMARY KEY(model_id,revision));
+CREATE TABLE benchmark_subsets(id TEXT PRIMARY KEY,current_revision INTEGER NOT NULL,archived INTEGER NOT NULL DEFAULT 0,created_at REAL NOT NULL,updated_at REAL NOT NULL);
+CREATE TABLE subset_revisions(subset_id TEXT NOT NULL REFERENCES benchmark_subsets(id),revision INTEGER NOT NULL,name TEXT NOT NULL,task_ids_json TEXT NOT NULL,fingerprint TEXT NOT NULL,created_at REAL NOT NULL,PRIMARY KEY(subset_id,revision));
+CREATE TABLE dataset_states(revision TEXT PRIMARY KEY,archived INTEGER NOT NULL DEFAULT 0,updated_at REAL NOT NULL);
+CREATE TABLE administration_jobs(id TEXT PRIMARY KEY,kind TEXT NOT NULL,payload_json TEXT NOT NULL,idempotency_key TEXT NOT NULL UNIQUE,state TEXT NOT NULL,created_at REAL NOT NULL,updated_at REAL NOT NULL,started_at REAL,finished_at REAL,owner TEXT,cancel_requested INTEGER NOT NULL DEFAULT 0,progress_json TEXT NOT NULL DEFAULT '{}',result_json TEXT,error TEXT);
+CREATE INDEX administration_jobs_queue ON administration_jobs(state,created_at);
+CREATE TABLE management_audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,at REAL NOT NULL,action TEXT NOT NULL,object_type TEXT NOT NULL,object_id TEXT NOT NULL,revision INTEGER,detail_json TEXT NOT NULL);
+CREATE TABLE provider_connection_events(seq INTEGER PRIMARY KEY AUTOINCREMENT,provider_id TEXT NOT NULL,at REAL NOT NULL,configuration_revision INTEGER NOT NULL,status TEXT NOT NULL,error TEXT);
+INSERT INTO metadata(key,value) VALUES('admin_crypto_namespace','__NAMESPACE__');
+PRAGMA user_version=3;
+COMMIT;

@@ -1,4 +1,31 @@
-# Independent SWE evaluation service — Phase 1
+# SWE Evaluation Center — Phase 2.7
+
+The current application includes a Chinese administration console for encrypted
+API providers, versioned model profiles, official dataset metadata, immutable
+benchmark subsets and reviewed batch experiments. New managed configurations are
+available without restarting the API or worker. Use the empty managed-profile
+fallback in `compose.management.yaml`; model JSON editing is not required.
+
+The qualified standalone deployment uses a native Linux Docker data volume and
+an explicit schema-3 migration. The official catalogue contains 500 records and
+the original 20-instance subset retains **13 READY / 7 ineligible**. This internal
+subset is not a full official SWE-bench score. Phase 2.7 verification used local
+deterministic providers and genuine grading infrastructure, without paid inference.
+
+Start with the [deployment guide](PHASE27_DEPLOYMENT_GUIDE.md),
+[architecture](PHASE27_ARCHITECTURE.md),
+[implementation report](PHASE27_IMPLEMENTATION_REPORT.md) and
+[acceptance report](PHASE27_ACCEPTANCE_REPORT.md).
+The [Phase 2.6 promotion report](PHASE26_PROMOTION_REPORT.md) records the source
+promotion and preservation of existing services/data.
+
+## Historical Phase 1 material
+
+The instructions and observations below are retained for historical compatibility.
+Their test counts and earlier live-run statements are not the current acceptance
+result. Legacy marker-based grading records are not trusted evaluation evidence.
+Use the current reports for grading-v2, official-harness trust boundaries,
+confidentiality, migrations and deployment readiness.
 
 A standalone FastAPI API and durable single-worker SWE evaluation backend. It
 does not import or change sub2api. Model requests go to administrator-configured

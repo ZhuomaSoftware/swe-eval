@@ -56,6 +56,15 @@ def snapshot(task, profile, effective=None):
 
 
 def submit_batch(repo, benchmark, profiles, body, settings):
+    # Optional management metadata must not change Phase 2.6 request hashes.
+    request_configuration = body.model_dump(mode='json', exclude={'subset_id','subset_revision'} if body.subset_id is None else set())
+    with repo.connect() as db:
+        prior = db.execute('SELECT id,request_hash FROM evaluation_batches WHERE idempotency_key=?',(body.idempotency_key,)).fetchone()
+    if prior:
+        if prior['request_hash'] != digest(request_configuration):
+            from .storage import Conflict
+            raise Conflict('idempotency key already used for different configuration')
+        return repo.batch(prior['id'])
     count = len(body.task_ids) * len(body.model_profile_ids) * body.attempts
     if body.max_duration > settings.max_batch_duration or body.max_requests > settings.max_batch_requests:
         raise ValueError('batch duration or request allowance exceeds server limit')
@@ -64,15 +73,24 @@ def submit_batch(repo, benchmark, profiles, body, settings):
     tasks = [benchmark.get_task(x) for x in body.task_ids]
     if any(getattr(task,"benchmark_type",None)=="official" and not task.environment_ready for task in tasks):
         raise ValueError("official tasks must pass environment, gold and negative validation before batch submission")
+    from .management import ConfigurationRepository
+    configuration=ConfigurationRepository(repo,settings)
+    if any(configuration.dataset_archived(task.dataset_version) for task in tasks):raise ValueError('dataset revision is archived')
+    subset=None
+    if body.subset_id:
+        subset=configuration.subset(body.subset_id,benchmark,body.subset_revision)
+        if subset['archived'] or set(subset['task_ids'])!=set(body.task_ids):raise ValueError('subset membership mismatch or archived subset')
     selected = [profiles[x] for x in body.model_profile_ids]
     specs = []
     for task in tasks:
         for profile in selected:
             effective = effective_profile(profile, body.limits, body.reasoning.get(profile.id), profile.id in body.reasoning)
             for attempt in range(1, body.attempts + 1):
-                specs.append((task.model_dump(mode='json'), model_snapshot(profile), snapshot(task, profile, effective), attempt))
+                provenance=snapshot(task, profile, effective)
+                if subset:provenance['selected_subset']={'id':subset['id'],'revision':subset['revision'],'fingerprint':subset['fingerprint']}
+                specs.append((task.model_dump(mode='json'), model_snapshot(profile), provenance, attempt))
     # Reserve each attempt's complete call allowance. No usage estimate is used as a hard budget.
     reserved = sum(x[2]['effective_model']['max_model_calls'] for x in specs)
     if reserved > body.max_requests:
         raise ValueError('reserved per-run request allowances exceed batch max_requests')
-    return repo.create_batch(body.model_dump(mode='json'), specs, settings.max_pending_runs, reserved)
+    return repo.create_batch(request_configuration, specs, settings.max_pending_runs, reserved)

@@ -111,6 +111,9 @@ class OpenAICompatibleProvider:
     def __init__(self, profile: ModelProfile, key: str, metrics: Metrics, *,
                  remaining: Callable[[], float], persist: Callable[[], None], transport=http_post):
         self.profile, self._key, self.metrics = profile, key, metrics
+        if profile.provider_id and transport is http_post:
+            from .outbound import request_json
+            transport = request_json
         self.remaining, self.persist, self.transport = remaining, persist, transport
         self._sums = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "reasoning_tokens": 0}
         self._known = {name: True for name in self._sums}

@@ -20,7 +20,7 @@ def preflight(settings):
             if len(fields)>=4 and fields[3].isdigit():daemon_capacity=int(fields[3])*1024
     return {"architecture":info.get("Architecture"),"docker_version":info.get("ServerVersion"),"docker_memory_bytes":memory,"cpus":info.get("NCPU"),"data_filesystem_free_bytes":free,"concurrency":1,"docker_storage_usage":storage.output if storage.returncode==0 else None,"docker_filesystem_free_bytes":daemon_capacity,"image_preparation_estimate_gb_per_task":8,"ready":free>=10*1024**3 and memory>=6*1024**3 and (daemon_capacity is None or daemon_capacity>=10*1024**3),"limitations":"Official Verified images are amd64; ARM requires verified emulation. Free-space observation is for the mounted data filesystem; monitor daemon storage separately."}
 
-def validate(settings,args):
+def validate(settings,args,*,check=lambda:None,service_id="phase26-validation",run_id=None,progress=lambda value:None):
     if not 1<=args.timeout<=3600:raise ValueError("validation timeout must be 1..3600")
     h=OfficialHarness(settings);c=h.catalogue
     tasks=c.list_tasks(revision=args.revision,repo=args.repo,status=args.status,subset=SUBSET if args.subset else None)
@@ -31,6 +31,7 @@ def validate(settings,args):
     if not tasks:raise ValueError("no matching official instances")
     report={"schema_version":"swe-dataset-validation-v1","preflight":preflight(settings),"items":[]}
     for t in tasks:
+        check()
         if args.resume and t.validation_status=="validated":
             report["items"].append({"instance_id":t.instance_id,"status":"validated","resumed":True});continue
         if args.dry_run:
@@ -40,19 +41,21 @@ def validate(settings,args):
             if not report["preflight"]["ready"]:raise SandboxError("insufficient disk or RAM")
             image=h.prepare(t,pull=args.prepare);evidence["image_digest"]=image
             private=c.private(t.dataset_version,t.instance_id)
-            gold=h.evaluate(t,private["patch"],uuid.uuid4().hex,"gold-validation","phase26-validation",timeout=args.timeout)
+            gold=h.evaluate(t,private["patch"],run_id or uuid.uuid4().hex,"gold-validation",service_id,timeout=args.timeout,check=check)
             evidence["gold"]=gold
             if gold["classification"]!="resolved":status="blocked" if gold["classification"] in ("environment_failure","timeout","evaluation_error") else "failed"
             else:
-                negative=h.evaluate(t,"",uuid.uuid4().hex,"unmodified-validation","phase26-validation",timeout=args.timeout,skip_patch=True)
+                negative=h.evaluate(t,"",run_id or uuid.uuid4().hex,"unmodified-validation",service_id,timeout=args.timeout,skip_patch=True,check=check)
                 evidence["negative"]=negative
                 status="validated" if negative["classification"]=="unresolved" else "blocked" if negative["classification"] in ("environment_failure","timeout","evaluation_error") else "failed"
         except KeyboardInterrupt:
             c.record_validation(t.dataset_version,t.instance_id,"interrupted",evidence);raise
         except (SandboxError,OSError):
             evidence["error"]="environment_preparation_or_harness_unavailable"
+        check()
         c.record_validation(t.dataset_version,t.instance_id,status,evidence)
         item={"instance_id":t.instance_id,"status":status,**evidence};report["items"].append(item)
+        progress({"completed":len(report["items"]),"selected":len(tasks),"instance_id":t.instance_id,"status":status})
         print(json.dumps({"progress":len(report["items"]),"selected":len(tasks),"instance_id":t.instance_id,"status":status}),flush=True)
         # Stage gate: avoid expensive follow-on pulls when the first task fails.
         if status!="validated" and not getattr(args,"continue_on_error",False):break

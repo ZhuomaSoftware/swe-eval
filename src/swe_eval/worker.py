@@ -48,6 +48,8 @@ class Worker:
         cleanup_started = time.monotonic()
         self.repo.event("cleanup_started", "Startup orphan cleanup in progress")
         interrupted = self.repo.recover(self.owner)
+        from .administration_jobs import AdministrativeJobs
+        AdministrativeJobs(self.repo,self.settings).recover(self.owner)
         if not cleanup_containers(self.settings.docker_bin, self.repo.service_id):
             self.repo.event("cleanup_failed", "Startup orphan cleanup failed")
             self.repo.release(self.owner)
@@ -114,6 +116,29 @@ class Worker:
             raise Conflict("worker lease was lost; worker stopped")
         return self.repo.get(run_id)
 
+    def supervise_administration(self,item):
+        from .administration_jobs import AdministrativeJobs,execute_administrative_job
+        jobs=AdministrativeJobs(self.repo,self.settings)
+        process=multiprocessing.get_context("spawn").Process(target=execute_administrative_job,args=(self.settings,item['id'],self.owner),daemon=False)
+        process.start();started=time.monotonic();last=0;state,error=None,None;lost=False
+        try:
+            while process.is_alive():
+                now=time.monotonic()
+                if now-last>=self.settings.lease_seconds/3:
+                    if not self.repo.heartbeat(self.owner,self.settings.lease_seconds):lost=True;break
+                    last=now
+                current=jobs.get(item['id'])
+                if current['cancel_requested'] or self.stop.is_set():state,error='cancelled','administrative_job_cancelled';break
+                if now-started>=item['payload']['wall_timeout']:state,error='timeout','administrative_wall_timeout';break
+                process.join(timeout=.2)
+        finally:
+            terminate_child(process)
+            cleaned=cleanup_containers(self.settings.docker_bin,self.repo.service_id,item['id'])
+            if not cleaned:self.repo.event('cleanup_failed','Administrative container cleanup failed');self.stop.set()
+            if not lost and jobs.get(item['id'])['state']=='running':
+                jobs.finish(item['id'],self.owner,state or 'failed',error=error or 'administrative_child_interrupted')
+        if lost:raise Conflict('worker lease was lost')
+
     def run(self, *, once=False):
         self.acquire()
         try:
@@ -123,10 +148,12 @@ class Worker:
                 record = self.repo.claim(self.owner)
                 if record:
                     self.supervise(record)
-                elif once:
-                    return
                 else:
-                    self.stop.wait(1)
+                    from .administration_jobs import AdministrativeJobs
+                    administrative=AdministrativeJobs(self.repo,self.settings).claim(self.owner)
+                    if administrative:self.supervise_administration(administrative)
+                    elif once:return
+                    else:self.stop.wait(1)
                 if once:
                     return
         finally:

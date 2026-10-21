@@ -99,8 +99,13 @@ def load_models(path: Path) -> dict[str, ModelProfile]:
     return {p.id: p for p in profiles}
 
 
-def resolve_key(profile: ModelProfile) -> str:
-    if profile.api_key_env:
+def resolve_key(profile: ModelProfile, settings: Settings | None = None) -> str:
+    if profile.provider_id:
+        if settings is None:raise ConfigurationError("dynamic credentials require trusted worker settings")
+        from .management import ConfigurationRepository
+        from .storage import SQLiteRepository
+        value = ConfigurationRepository(SQLiteRepository(settings.database), settings).secret(profile.provider_id, profile.credential_version)
+    elif profile.api_key_env:
         value = os.getenv(profile.api_key_env, "")
     elif profile.api_key_file:
         value = Path(profile.api_key_file).read_text().strip()

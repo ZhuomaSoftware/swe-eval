@@ -70,7 +70,7 @@ class SQLiteRepository:
         with self.connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3):
                 raise RuntimeError("unsupported database schema version")
             if version < 2:
                 db.executescript("""

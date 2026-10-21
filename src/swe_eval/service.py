@@ -10,7 +10,7 @@ from .storage import SQLiteRepository
 def model_snapshot(profile: ModelProfile):
     snapshot = profile.public()
     # Compare immutable launch configuration without persisting endpoint URLs or credentials.
-    snapshot["configuration_hash"] = hashlib.sha256(profile.model_dump_json().encode()).hexdigest()
+    snapshot["configuration_hash"] = hashlib.sha256(profile.model_dump_json(exclude={"provider_id","provider_revision","configuration_revision","credential_version","display_name"} if profile.provider_id is None else set()).encode()).hexdigest()
     return snapshot
 
 
@@ -31,6 +31,9 @@ def enqueue(repo, benchmark, profiles, task_id, profile_id, *, mode="agent", par
     task, profile = benchmark.get_task(task_id), profiles[profile_id]
     if getattr(task,"benchmark_type",None)=="official" and not task.environment_ready:
         raise ValueError("official task must pass environment, gold and negative validation before execution")
+    from .management import ConfigurationRepository
+    if ConfigurationRepository(repo, None).dataset_archived(task.dataset_version):
+        raise ValueError("dataset revision is archived")
     from .center import snapshot
     return repo.create(task.model_dump(mode="json"), model_snapshot(profile), mode=mode, parent_id=parent_id,
                        snapshot=snapshot(task, profile), max_pending=max_pending)

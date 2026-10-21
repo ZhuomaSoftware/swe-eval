@@ -80,7 +80,8 @@ class EvaluationEngine:
             if supplied_patch is None:
                 _, _, _, version = verify_mini_api()
                 metrics.agent_version = version
-                key = resolve_key(profile)
+                key = resolve_key(profile, self.settings)
+                self.repo.redact.add(key)
                 agent_sandbox = create()
                 metrics.execution_metadata["agent_image_digest"] = agent_sandbox.image_digest
                 agent_sandbox.prepare(source, task)
@@ -170,8 +171,12 @@ def execute_run(settings: Settings, run_id: str, supplied_patch: str | None = No
     os.setsid()  # Supervision can terminate Docker CLI descendants along with this child.
     configure_logging()
     os.environ["MSWEA_GLOBAL_CONFIG_DIR"] = str(settings.data_dir / "mini-config")
-    profiles = load_models(settings.models_file)
     repo = repository(settings, worker=True)
+    from .management import bound_profiles
+    try:profiles = bound_profiles(settings, repo, repo.get(run_id))
+    except (ValueError, KeyError):
+        repo.transition(run_id, RunState.FAILED, "immutable_configuration_or_credential_unavailable")
+        return
     from .benchmarks.official import TaskRegistry
     engine = EvaluationEngine(repo, TaskRegistry(settings), profiles, settings)
     engine.execute(run_id, supplied_patch=supplied_patch)

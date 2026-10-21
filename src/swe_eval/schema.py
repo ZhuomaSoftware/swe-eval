@@ -40,9 +40,9 @@ class Capabilities(StrictModel):
 
 
 class Pricing(StrictModel):
-    input_per_million: float = Field(ge=0)
-    output_per_million: float = Field(ge=0)
-    currency: Literal["USD"] = "USD"
+    input_per_million: float = Field(ge=0, allow_inf_nan=False)
+    output_per_million: float = Field(ge=0, allow_inf_nan=False)
+    currency: Literal["USD", "CNY", "EUR"] = "USD"
 
 
 class ModelProfile(StrictModel):
@@ -67,6 +67,12 @@ class ModelProfile(StrictModel):
     max_context_chars: int = Field(default=160000, ge=1000, le=2000000)
     pricing: Pricing | None = None
 
+    provider_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$")
+    provider_revision: int | None = Field(default=None, ge=1)
+    configuration_revision: int | None = Field(default=None, ge=1)
+    credential_version: int | None = Field(default=None, ge=1)
+    display_name: str | None = Field(default=None, max_length=100)
+
     @model_validator(mode="after")
     def validate_profile(self):
         url = urlsplit(self.base_url)
@@ -78,7 +84,7 @@ class ModelProfile(StrictModel):
             raise ValueError("HTTP endpoints require allow_http=true")
         if self.api_key_env and self.api_key_file:
             raise ValueError("choose api_key_env or api_key_file")
-        if not (self.api_key_env or self.api_key_file or self.allow_no_api_key):
+        if not (self.api_key_env or self.api_key_file or self.allow_no_api_key or (self.provider_id and self.credential_version)):
             raise ValueError("configure a server-side API key reference")
         if self.reasoning_effort and not self.capabilities.reasoning_effort:
             raise ValueError("reasoning_effort requested but capability is disabled")
@@ -86,7 +92,10 @@ class ModelProfile(StrictModel):
 
     def public(self) -> dict:
         # Keep endpoint routing, credential references, and secret values server-side.
-        return self.model_dump(exclude={"api_key_env", "api_key_file", "base_url"})
+        excluded = {"api_key_env", "api_key_file", "base_url"}
+        if self.provider_id is None:
+            excluded.update({"provider_id", "provider_revision", "configuration_revision", "credential_version", "display_name"})
+        return self.model_dump(exclude=excluded)
 
 
 class RepositorySource(StrictModel):

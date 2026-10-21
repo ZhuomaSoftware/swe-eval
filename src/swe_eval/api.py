@@ -87,6 +87,10 @@ def create_app(settings: Settings | None = None):
         return {"status": "ok", "database": "ready", "service": "swe-eval", "version": "0.2.0"}
 
     auth = [Depends(administrator)]
+    from .management import current_profiles
+    from .management_api import install_management
+    install_management(app,settings,repo,benchmark,auth)
+    def available_profiles():return current_profiles(settings,repo)
 
     @app.get("/api/v1/tasks", dependencies=auth)
     def tasks(dataset: str | None=None, repo_filter: str | None=Query(None,alias="repo"), validation_status: str | None=None, instance_id: str | None=None, benchmark_type: str | None=None, subset: str | None=None):
@@ -103,12 +107,12 @@ def create_app(settings: Settings | None = None):
 
     @app.get("/api/v1/models", dependencies=auth)
     def models():
-        return {"items": [dict(profile.public(), endpoint_identity=hashlib.sha256(profile.base_url.rstrip('/').encode()).hexdigest()[:16]) for profile in profiles.values()]}
+        return {"items": [dict(profile.public(), endpoint_identity=hashlib.sha256(profile.base_url.rstrip('/').encode()).hexdigest()[:16]) for profile in available_profiles().values()]}
 
     @app.post("/api/v1/runs", status_code=202, dependencies=auth)
     def create_run(body: CreateRun):
         try:
-            record = enqueue(repo, benchmark, profiles, body.task_id, body.model_profile_id, max_pending=settings.max_pending_runs)
+            record = enqueue(repo, benchmark, available_profiles(), body.task_id, body.model_profile_id, max_pending=settings.max_pending_runs)
         except KeyError:
             raise HTTPException(422, "unknown trusted task or model profile") from None
         except ValueError:
@@ -159,7 +163,7 @@ def create_app(settings: Settings | None = None):
         if record["state"] not in TERMINAL or record["mode"] != "agent":
             raise HTTPException(409, "only terminal agent runs can be retried")
         try:
-            return public_run(enqueue(repo, benchmark, profiles, record["task"]["id"], record["model"]["id"], parent_id=run_id, max_pending=settings.max_pending_runs))
+            return public_run(enqueue(repo, benchmark, available_profiles(), record["task"]["id"], record["model"]["id"], parent_id=run_id, max_pending=settings.max_pending_runs))
         except KeyError:
             raise HTTPException(422, "task or profile is no longer configured") from None
 
@@ -208,16 +212,19 @@ def create_app(settings: Settings | None = None):
                 'trusted_metrics':summary(trusted), 'diagnostic_metrics':summary(diagnostic),
                 'trusted_metrics_origin':'live', 'legacy_or_unattributed_runs':sum(not eligible_attempt(r) for r in all_runs),
                 'non_live_diagnostic_runs':sum(not trusted_attempt(r) for r in diagnostic),
-                'operations':repo.operations()}
+                'operations':repo.operations(),
+                'resources':{'available_models':len(available_profiles()),'imported_official_tasks':len(benchmark.catalogue.list_tasks()),'validated_official_tasks':sum(t.environment_ready for t in benchmark.catalogue.list_tasks())}}
 
     @app.get('/api/v1/system',dependencies=auth)
     def system():
-        return repo.operations()
+        from .administration_jobs import AdministrativeJobs
+        result=repo.operations();result['administrative_jobs']=AdministrativeJobs(repo,settings).list()
+        return result
 
     @app.post('/api/v1/batches',dependencies=auth,status_code=202)
     def create_batch(body: BatchSubmission):
         try:
-            return submit_batch(repo,benchmark,profiles,body,settings)
+            return submit_batch(repo,benchmark,available_profiles(),body,settings)
         except KeyError:
             raise HTTPException(422,'unknown trusted task or model profile') from None
         except ValueError as error:
@@ -251,9 +258,9 @@ def create_app(settings: Settings | None = None):
         if format=='json':
             return JSONResponse(value,headers={'Content-Disposition':'attachment; filename="swe-comparison.json"'})
         output=io.StringIO();writer=csv.writer(output)
-        writer.writerow(['schema_version','benchmark','dataset_version','grading_protocol','harness_revision','subset','official_harness_version','agent_version','profile_id','model_id','upstream_id','reasoning_effort','task_count','matched_task_count','attempts','valid_evaluations','resolved_rate','pass_at_1','total_cost','unknown_cost_attempts','methodology'])
+        writer.writerow(['schema_version','benchmark','dataset_version','grading_protocol','harness_revision','subset','official_harness_version','agent_version','profile_id','model_id','upstream_id','reasoning_effort','task_count','matched_task_count','attempts','valid_evaluations','resolved_rate','pass_at_1','total_cost','currency','mixed_currencies','unknown_cost_attempts','methodology'])
         for group in value['groups']:
-            row=[value['schema_version']]+[group[x] for x in ('benchmark','dataset_version','grading_protocol','harness_revision','subset','official_harness_version','agent_version','profile_id','model_id','upstream_id','reasoning_effort','task_count','matched_task_count')]+[group['metrics'][x] for x in ('attempts','valid_evaluations','resolved_rate','pass_at_1','total_cost','unknown_cost_attempts')]+[json.dumps(value['methodology'],ensure_ascii=False)]
+            row=[value['schema_version']]+[group[x] for x in ('benchmark','dataset_version','grading_protocol','harness_revision','subset','official_harness_version','agent_version','profile_id','model_id','upstream_id','reasoning_effort','task_count','matched_task_count')]+[group['metrics'][x] for x in ('attempts','valid_evaluations','resolved_rate','pass_at_1','total_cost','currency','mixed_currencies','unknown_cost_attempts')]+[json.dumps(value['methodology'],ensure_ascii=False)]
             writer.writerow([csv_cell(v) for v in row])
         return PlainTextResponse(output.getvalue(),media_type='text/csv',headers={'Content-Disposition':'attachment; filename="swe-comparison.csv"'})
 

@@ -23,7 +23,7 @@ def direct(settings, task_id, profile_id, *, patch=None, profiles=None):
     worker.acquire()
     try:
         from .benchmarks.official import TaskRegistry
-        record = enqueue(worker.repo, TaskRegistry(settings), profiles or load_models(settings.models_file),
+        record = enqueue(worker.repo, TaskRegistry(settings), profiles or __import__("swe_eval.management",fromlist=["current_profiles"]).current_profiles(settings,worker.repo),
                          task_id, profile_id, mode="patch_verification" if patch is not None else "agent")
         record = worker.repo.claim(worker.owner, record["id"])
         return worker.supervise(record, supplied_patch=patch)
@@ -35,6 +35,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Independent SWE evaluation service")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init-db")
+    commands.add_parser("migrate-admin", help="Explicitly migrate an authorized schema-2 database to administration schema 3")
     commands.add_parser("doctor")
     serve = commands.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
@@ -83,6 +84,10 @@ def main(argv=None):
                 from .dataset_validation import validate
                 result=validate(settings,args);print_json(result)
                 return 0 if args.dry_run or all(x["status"]=="validated" for x in result["items"]) else 1
+        elif args.command == "migrate-admin":
+            from .management import migrate_administration
+            migrate_administration(repository(settings))
+            print_json({"schema":3,"status":"administration migration complete"})
         elif args.command == "init-db":
             repository(settings)
             print_json({"database": str(settings.database), "schema": 2})
@@ -133,7 +138,7 @@ def main(argv=None):
             from .agent import verify_mini_api
             from .sandbox import run_process
 
-            report = {"python": sys.version.split()[0], "models": len(load_models(settings.models_file)),
+            report = {"python": sys.version.split()[0], "models": len(__import__("swe_eval.management",fromlist=["current_profiles"]).current_profiles(settings)),
                       "tasks": len(LocalBenchmark(settings.task_dir).list_tasks())}
             os.environ["MSWEA_GLOBAL_CONFIG_DIR"] = str(settings.data_dir / "mini-config")
             try:

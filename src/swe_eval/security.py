@@ -9,6 +9,9 @@ class Redactor:
     def __init__(self, secrets=()):
         self.secrets = sorted({s for s in secrets if s}, key=len, reverse=True)
 
+    def add(self, secret):
+        if secret:self.secrets = sorted(set(self.secrets) | {secret}, key=len, reverse=True)
+
     def __call__(self, value: str) -> str:
         for secret in self.secrets:
             value = value.replace(secret, "[REDACTED]")

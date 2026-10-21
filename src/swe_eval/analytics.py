@@ -94,6 +94,9 @@ def summary(runs):
     durations = [r['metrics']['wall_seconds'] for r in runs if r['state'] in ('completed','failed','timeout','cancelled')]
     costs = [r['metrics']['cost'] for r in runs]
     known = [x for x in costs if x is not None]
+    currencies={r['metrics'].get('currency') for r in runs if r['metrics']['cost'] is not None}
+    single_currency=len(currencies)<=1
+    by_currency={str(c):sum(r['metrics']['cost'] for r in runs if r['metrics']['cost'] is not None and r['metrics'].get('currency')==c) for c in currencies}
     requests = sum(r['metrics']['model_requests'] for r in runs)
     api_errors = sum(r['metrics']['api_errors'] for r in runs)
     infra = sum(r['state'] in ('failed','timeout') for r in runs)
@@ -114,10 +117,11 @@ def summary(runs):
         latency_samples=len(durations),model_requests=requests,api_errors=api_errors,
         api_error_rate=api_errors/requests if requests else None,
         infrastructure_failure_rate=infra/len(runs) if runs else None,
-        known_cost_subtotal=sum(known) if known else None,unknown_cost_attempts=len(costs)-len(known),
-        total_cost=sum(known) if costs and len(known)==len(costs) else None,
-        average_task_cost=sum(known)/len(costs) if costs and len(known)==len(costs) else None,
-        cost_per_resolved_task=sum(known)/resolved if resolved and len(known)==len(costs) else None,
+        currency=next(iter(currencies)) if len(currencies)==1 else None,mixed_currencies=not single_currency,known_cost_by_currency=by_currency,
+        known_cost_subtotal=sum(known) if known and single_currency else None,unknown_cost_attempts=len(costs)-len(known),
+        total_cost=sum(known) if costs and single_currency and len(known)==len(costs) else None,
+        average_task_cost=sum(known)/len(costs) if costs and single_currency and len(known)==len(costs) else None,
+        cost_per_resolved_task=sum(known)/resolved if resolved and single_currency and len(known)==len(costs) else None,
         **totals)
 
 
@@ -132,7 +136,7 @@ def comparison(repo, *, profile_ids=None, batch_id=None):
         if run['mode']!='agent':
             excluded['non_agent']+=1; continue
         task = run['task']
-        key = (task['benchmark'],task['dataset_version'],s['harness_revision'],s['grading_protocol'],s.get('subset'),s.get('agent_version') if s['grading_protocol']==OFFICIAL_PROTOCOL else None,run['model']['id'],
+        key = (task['benchmark'],task['dataset_version'],s['harness_revision'],s['grading_protocol'],str(s.get('subset') or '')+' | '+s['selected_subset']['id']+'@'+str(s['selected_subset']['revision'])+':'+s['selected_subset']['fingerprint'] if s.get('selected_subset') else s.get('subset'),s.get('agent_version') if s['grading_protocol']==OFFICIAL_PROTOCOL else None,run['model']['id'],
                run['model']['upstream_id'],s['runtime_fingerprint'],s['effective_model']['reasoning_effort'],s['endpoint_identity'],
                s['configuration_fingerprint'],digest(s['effective_model']),s['data_origin'])
         grouped[key].append(run)
@@ -143,7 +147,7 @@ def comparison(repo, *, profile_ids=None, batch_id=None):
         item = dict(id=digest(key)[:20],benchmark=benchmark,dataset_version=version,harness_revision=harness,
             profile_id=profile,model_id=runs[0]['model']['model_id'],upstream_id=upstream,reasoning_effort=reasoning,
             endpoint_identity=runs[0]['snapshot']['endpoint_identity'],runtime_fingerprint=runtime,
-            grading_protocol=protocol,subset=subset,agent_version=agent_version,official_harness_version=HARNESS_VERSION if protocol==OFFICIAL_PROTOCOL else None,configuration_fingerprint=config,effective_configuration_fingerprint=effective,
+            grading_protocol=protocol,subset=subset,selected_subset=runs[0]['snapshot'].get('selected_subset'),agent_version=agent_version,official_harness_version=HARNESS_VERSION if protocol==OFFICIAL_PROTOCOL else None,configuration_fingerprint=config,effective_configuration_fingerprint=effective,
             trusted_evidence=origin=='live' and protocol==PROTOCOL,evidence_authority='official_test_log_report' if protocol==OFFICIAL_PROTOCOL else 'isolated_v2_controller',data_origins=sorted({r['snapshot']['data_origin'] for r in runs}),
             upstream_verified=all(r['snapshot']['upstream_verified'] for r in runs),
             task_count=len(tasks),metrics=summary(runs),warnings=[],

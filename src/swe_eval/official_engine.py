@@ -52,7 +52,8 @@ class OfficialEvaluationEngine:
                 metrics.agent_version=verify_mini_api()[3]
                 box=create();box.prepare(None,task);metrics.execution_metadata["agent_image_digest"]=box.image_digest
                 self.repo.transition(run_id,RunState.RUNNING);persist()
-                provider=OpenAICompatibleProvider(profile,resolve_key(profile),metrics,remaining=remaining,persist=persist)
+                key=resolve_key(profile,self.settings);self.repo.redact.add(key)
+                provider=OpenAICompatibleProvider(profile,key,metrics,remaining=remaining,persist=persist)
                 status=MiniSWEAgent().run(task,box,provider,profile,metrics,persist,log,remaining)
                 if status=="TimeExceeded":raise ExecutionTimeout("official agent duration exceeded")
                 patch=box.capture_patch(task.base_commit);box.close();box=None

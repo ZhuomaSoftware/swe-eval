@@ -1,0 +1,39 @@
+# Independent Phase 2.7 staging project. No existing production volume or source mount.
+name: swe-phase27-management
+x-common: &common
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  init: true
+  tmpfs: [/tmp:size=256m,nosuid,nodev]
+  env_file:
+    - path: ${SWE_MANAGEMENT_ENV_FILE:?Provide a restricted external environment file}
+      format: raw
+  environment: &environment
+    SWE_DATA_DIR: /data
+    SWE_MODELS_FILE: /config/models.json
+    SWE_PUBLIC_ORIGIN: ${SWE_MANAGEMENT_ORIGIN:-http://127.0.0.1:18327}
+    SWE_COOKIE_SECURE: ${SWE_COOKIE_SECURE:-false}
+    MSWEA_GLOBAL_CONFIG_DIR: /tmp/mini-config
+    PYTHONFAULTHANDLER: "1"
+services:
+  api:
+    <<: *common
+    image: swe-main-p27-api:20261021
+    command: [swe-eval, serve, --host, 0.0.0.0]
+    ports: ["127.0.0.1:18327:8000"]
+    volumes:
+      - management-data:/data
+      - ./config/models.managed.json:/config/models.json:ro
+  worker:
+    <<: *common
+    image: swe-main-p27-worker:20261021
+    command: [swe-eval, worker]
+    group_add: ["${DOCKER_GID:-0}"]
+    stop_grace_period: 15s
+    volumes:
+      - management-data:/data
+      - ./config/models.managed.json:/config/models.json:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+volumes:
+  management-data:
