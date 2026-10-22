@@ -25,6 +25,10 @@ class OfficialEvaluationEngine:
         def remaining():
             if self.repo.get(run_id)["cancel_requested"]:raise Cancelled("evaluation cancelled")
             seconds=duration-(time.monotonic()-started)
+            if record.get('batch'):
+                batch=self.repo.batch(record['batch']['batch_id'])
+                if batch['cancel_requested'] or batch['deadline']<=time.time():raise Cancelled('batch stopped')
+                seconds=min(seconds,batch['deadline']-time.time())
             if seconds<=0:raise ExecutionTimeout("official evaluation duration exceeded")
             return seconds
         def persist():
@@ -53,7 +57,8 @@ class OfficialEvaluationEngine:
                 box=create();box.prepare(None,task);metrics.execution_metadata["agent_image_digest"]=box.image_digest
                 self.repo.transition(run_id,RunState.RUNNING);persist()
                 key=resolve_key(profile,self.settings);self.repo.redact.add(key)
-                provider=OpenAICompatibleProvider(profile,key,metrics,remaining=remaining,persist=persist)
+                from .retries import RetryRuntime
+                provider=OpenAICompatibleProvider(profile,key,metrics,remaining=remaining,persist=persist,retry_policy=snap.get('api_retry',{'enabled':False}),runtime=RetryRuntime(self.repo,self.settings,record))
                 status=MiniSWEAgent().run(task,box,provider,profile,metrics,persist,log,remaining)
                 if status=="TimeExceeded":raise ExecutionTimeout("official agent duration exceeded")
                 patch=box.capture_patch(task.base_commit);box.close();box=None

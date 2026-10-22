@@ -143,6 +143,55 @@ class ManagementTests(unittest.TestCase):
   rows=list(csv.DictReader(io.StringIO(response.text)));self.assertEqual(rows[0]['currency'],'CNY');self.assertEqual(rows[0]['total_cost'],'1.25');self.assertEqual(rows[0]['mixed_currencies'],'False')
  def test_missing_worker_metrics_do_not_claim_health(self):
   r=self.client.get('/api/v1/system',headers=self.headers);self.assertFalse(r.json()['worker_ready'])
+ def test_model_discovery_requires_admin_and_same_origin_csrf(self):
+  self.provider();path='/api/v1/manage/providers/gateway/discover-models'
+  self.assertEqual(self.client.post(path).status_code,401)
+  from swe_eval.sessions import issue,COOKIE
+  token,csrf,_=issue(self.repo);self.client.cookies.set(COOKIE,token)
+  with patch('swe_eval.management_api.request_json',return_value={'data':[{'id':'model-a'}]}) as transport:
+   self.assertEqual(self.client.post(path).status_code,403)
+   transport.assert_not_called()
+   self.assertEqual(self.client.post(path,headers={'Origin':'http://testserver','X-CSRF-Token':csrf}).status_code,200)
+ def test_model_discovery_sanitizes_metadata_and_never_creates_profiles(self):
+  self.provider();secret='canary-private-secret-9f32a0'
+  values={'data':[{'id':'model-b','api_key':secret,'owned_by':self.settings.admin_token},{'id':'model-a'},{'id':'model-a'},{'id':secret},{'id':'bad\nmodel'},{'id':'<script>alert(1)</script>'},{'id':'x'*201},{'id':5},'invalid',{}],'private':secret}
+  with patch('swe_eval.management_api.request_json',return_value=values) as transport:
+   response=self.client.post('/api/v1/manage/providers/gateway/discover-models',headers=self.headers)
+  self.assertEqual(response.status_code,200,response.text);self.assertEqual(response.json()['items'],[{'id':'model-a'},{'id':'model-b'}]);self.assertFalse(response.json()['inference_performed']);self.assertEqual(response.json()['provider_revision'],1)
+  self.assertNotIn(secret,response.text);self.assertNotIn(self.settings.admin_token,response.text);self.assertNotIn('owned_by',response.text);self.assertEqual(self.c.models(),[])
+  transport.assert_called_once_with('http://127.0.0.1:18991/v1/models',secret,timeout=5)
+ def test_model_discovery_disabled_provider_never_contacts_upstream(self):
+  self.provider(enabled=False)
+  with patch('swe_eval.management_api.request_json') as transport:
+   self.assertEqual(self.client.post('/api/v1/manage/providers/gateway/discover-models',headers=self.headers).status_code,409);transport.assert_not_called()
+ def test_model_discovery_failure_never_echoes_upstream_or_credentials(self):
+  from swe_eval.providers import ProviderError
+  self.provider();path='/api/v1/manage/providers/gateway/discover-models'
+  for values in ({'bad':'private'},{'data':'private'}):
+   with patch('swe_eval.management_api.request_json',return_value=values):self.assertEqual(self.client.post(path,headers=self.headers).status_code,502)
+  with patch('swe_eval.management_api.request_json',side_effect=ProviderError('canary-private-secret-9f32a0')):
+   response=self.client.post(path,headers=self.headers);self.assertEqual(response.status_code,502);self.assertNotIn('canary-private-secret',response.text)
+  self.assertNotIn('canary-private-secret',json.dumps(self.c.provider('gateway')['recent_connection_errors']))
+ def test_model_discovery_revoked_credential_fails_closed(self):
+  self.provider();self.c.revoke('gateway',1)
+  with patch('swe_eval.management_api.request_json') as transport:
+   self.assertEqual(self.client.post('/api/v1/manage/providers/gateway/discover-models',headers=self.headers).status_code,502);transport.assert_not_called()
+ def test_model_discovery_bounds_and_reports_truncated_unique_ids(self):
+  self.provider()
+  with patch('swe_eval.management_api.request_json',return_value={'data':[{'id':f'model-{n:04d}'} for n in range(501)]}):
+   result=self.client.post('/api/v1/manage/providers/gateway/discover-models',headers=self.headers).json()
+  self.assertEqual(len(result['items']),500);self.assertEqual(result['total'],501);self.assertTrue(result['truncated'])
+ def test_batch_request_budget_explains_effective_reservation_without_creating_jobs(self):
+  self.provider();self.model();body={'name':'Budget validation','task_ids':['intervals-001'],'model_profile_ids':['dynamic'],'attempts':2,'limits':{'timeout':600,'steps':15,'requests':20,'output_tokens':5120,'total_tokens':300000},'max_requests':1,'idempotency_key':'budget-reservation-explanation'}
+  for path in ('/api/v1/manage/batch-preview','/api/v1/batches'):
+   r=self.client.post(path,json=body,headers=self.headers);self.assertEqual(r.status_code,422,r.text);self.assertIn('30',r.json()['detail']);self.assertIn('当前为 1',r.json()['detail']);self.assertNotIn('canary-private-secret',r.text)
+  self.assertEqual(self.repo.list(),[])
+  r=self.client.post('/api/v1/manage/batch-preview',json={**body,'max_requests':30},headers=self.headers);self.assertEqual(r.status_code,200,r.text);self.assertEqual(r.json()['reserved_requests'],30);self.assertEqual(r.json()['maximum_run_seconds'],300);self.assertEqual(self.repo.list(),[])
+ def test_batch_request_budget_uses_each_model_cap_and_preserves_server_ceiling(self):
+  self.provider();self.model();self.c.write_model(ManagedModelWrite(id='second',display_name='Second',provider_id='gateway',model_id='alias2',upstream_id='gateway',max_model_calls=5),create=True)
+  body={'name':'Independent request caps','task_ids':['intervals-001'],'model_profile_ids':['dynamic','second'],'attempts':2,'max_requests':40,'limits':{'requests':20},'idempotency_key':'budget-per-profile-cap'}
+  r=self.client.post('/api/v1/manage/batch-preview',json=body,headers=self.headers);self.assertEqual(r.status_code,200,r.text);self.assertEqual(r.json()['reserved_requests'],2*(15+5))
+  self.assertEqual(self.client.post('/api/v1/manage/batch-preview',json={**body,'max_requests':10001},headers=self.headers).status_code,422)
 
 class OutboundTests(unittest.TestCase):
  def test_unsafe_schemes_redirect_targets_and_http_denied(self):

@@ -1,7 +1,8 @@
 """DNS-pinned outbound HTTP. No redirects, environment proxies or URL secrets."""
 import concurrent.futures,http.client,ipaddress,json,os,socket,ssl,time,threading
 from urllib.parse import urlsplit
-from .providers import ProviderError
+from .provider_errors import ProviderError, CompatibilityError
+from .retries import classify_http,transport_failure
 _RESOLVER=concurrent.futures.ThreadPoolExecutor(max_workers=4,thread_name_prefix='provider-dns')
 class OutboundDenied(ProviderError):pass
 
@@ -34,10 +35,12 @@ def resolve_target(value,timeout):
     normalized,origin,host,port=normalize_url(validate_url(value));approved=origin in approved_origins()
     future=_RESOLVER.submit(socket.getaddrinfo,host,port,type=socket.SOCK_STREAM)
     try:records=future.result(timeout=max(.01,min(timeout,3)))
-    except (OSError,concurrent.futures.TimeoutError):
-        future.cancel();raise OutboundDenied('provider DNS unavailable or timed out') from None
+    except concurrent.futures.TimeoutError:
+        future.cancel();raise ProviderError('provider DNS timed out',category='network',retryable=True) from None
+    except OSError as error:
+        raise transport_failure(error) from None
     addresses=list(dict.fromkeys(row[4][0] for row in records))
-    if not addresses:raise OutboundDenied('provider DNS has no usable address')
+    if not addresses:raise ProviderError('provider DNS has no usable address',category='network',retryable=True)
     for value in addresses:
         try:ip=ipaddress.ip_address(value)
         except ValueError:raise OutboundDenied('provider DNS returned an invalid address') from None
@@ -60,7 +63,7 @@ class PinnedHTTPS(PinnedHTTP):
 
 def request_json(url,key,body=None,timeout=5):
     started=time.monotonic();url,host,port,addresses=resolve_target(url,timeout);remaining=timeout-(time.monotonic()-started)
-    if remaining<=0:raise ProviderError('provider request timed out')
+    if remaining<=0:raise ProviderError('provider request timed out',category='request_timeout',retryable=True,ambiguous=True)
     u=urlsplit(url);connection=(PinnedHTTPS if u.scheme=='https' else PinnedHTTP)(host,port,addresses[0],remaining)
     headers={'Accept':'application/json','Content-Type':'application/json'}
     if key:headers['Authorization']='Bearer '+key
@@ -75,21 +78,30 @@ def request_json(url,key,body=None,timeout=5):
     try:
         connection.request('POST' if body is not None else 'GET',u.path or '/',body=json.dumps(body).encode() if body is not None else None,headers=headers)
         response=connection.getresponse()
-        if not 200<=response.status<300:raise ProviderError('upstream HTTP '+str(response.status))
-        data=bytearray();maximum=2*1024*1024 if body is not None else 65536
+
+        data=bytearray();maximum=2*1024*1024 if body is not None and 200<=response.status<300 else 65536
         while True:
             remaining=timeout-(time.monotonic()-started)
-            if remaining<=0:raise ProviderError('provider request timed out')
+            if remaining<=0:raise ProviderError('provider request timed out',category='request_timeout',retryable=True,ambiguous=True)
             connection.sock.settimeout(remaining) if connection.sock else None
             chunk=response.read1(min(65536,maximum+1-len(data)))
             if not chunk:break
             data.extend(chunk)
-            if len(data)>maximum:raise ProviderError('upstream response exceeds bounded size')
+            if len(data)>maximum:raise CompatibilityError('upstream response exceeds bounded size',category='oversized_response',ambiguous=True)
+        if not 200<=response.status<300:
+            try:payload=json.loads(data)
+            except (ValueError,UnicodeError):payload={}
+            raise classify_http(response.status,response.headers,payload)
         result=json.loads(data)
         if not isinstance(result,dict):raise ValueError()
         return result
     except ProviderError:raise
-    except (OSError,ValueError,http.client.HTTPException):raise ProviderError('provider connection failed, timed out or returned invalid JSON') from None
+    except ssl.SSLCertVerificationError:raise ProviderError('TLS verification failed',category='tls_verification') from None
+    except (TimeoutError,socket.timeout):raise ProviderError('provider request timed out',category='request_timeout',retryable=True,ambiguous=True) from None
+    except (ValueError,UnicodeError):raise CompatibilityError('provider returned malformed JSON',category='malformed_response',ambiguous=True) from None
+    except (OSError,http.client.HTTPException) as error:
+        if time.monotonic()-started>=timeout:raise ProviderError('provider request timed out',category='request_timeout',retryable=True,ambiguous=True) from None
+        raise transport_failure(error) from None
     finally:
         deadline.cancel()
         if response is not None:response.close()

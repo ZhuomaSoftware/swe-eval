@@ -41,6 +41,10 @@ class EvaluationEngine:
             if current["cancel_requested"]:
                 raise Cancelled("evaluation cancelled")
             seconds = duration - (time.monotonic() - started)
+            if record.get('batch'):
+                batch=self.repo.batch(record['batch']['batch_id'])
+                if batch['cancel_requested'] or batch['deadline']<=time.time():raise Cancelled('batch stopped')
+                seconds=min(seconds,batch['deadline']-time.time())
             if seconds <= 0:
                 raise ExecutionTimeout("evaluation duration exceeded")
             return seconds
@@ -87,7 +91,9 @@ class EvaluationEngine:
                 agent_sandbox.prepare(source, task)
                 self.repo.transition(run_id, RunState.RUNNING)
                 persist()
-                provider = self.provider_factory(profile, key, metrics, remaining=remaining, persist=persist)
+                from .retries import RetryRuntime
+                options = {"retry_policy":(record.get('snapshot') or {}).get('api_retry',{'enabled':False}),"runtime":RetryRuntime(self.repo,self.settings,record)} if self.provider_factory is OpenAICompatibleProvider else {}
+                provider = self.provider_factory(profile, key, metrics, remaining=remaining, persist=persist, **options)
                 status = self.agent.run(task, agent_sandbox, provider, profile, metrics, persist, log, remaining)
                 if status == "TimeExceeded":
                     raise ExecutionTimeout("agent duration exceeded")

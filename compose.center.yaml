@@ -1,0 +1,12 @@
+# Add to compose.yaml on a NEW deployment, after backup/migration rehearsal.
+services:
+  api:
+    environment:
+      SWE_UI_PASSWORD_HASH: ${SWE_UI_PASSWORD_HASH:?Generate a console password hash}
+      SWE_COOKIE_SECURE: ${SWE_COOKIE_SECURE:-true}
+      SWE_PUBLIC_ORIGIN: ${SWE_PUBLIC_ORIGIN:-https://swe.example.com}
+      SWE_SHADOW_TOKEN: ${SWE_SHADOW_TOKEN:-}
+      SWE_MAX_BATCH_RUNS: ${SWE_MAX_BATCH_RUNS:-100}
+      SWE_MAX_PENDING_RUNS: ${SWE_MAX_PENDING_RUNS:-200}
+      SWE_MAX_BATCH_DURATION: ${SWE_MAX_BATCH_DURATION:-86400}
+      SWE_MAX_BATCH_REQUESTS: ${SWE_MAX_BATCH_REQUESTS:-10000}

@@ -1,0 +1,18 @@
+# Verified local Phase 2.5 artifacts. Use with compose.yaml + compose.console.local.yaml.
+# Immutable installed packages; no source mounts or auto-reload.
+services:
+  api:
+    image: sha256:5528430648493b11472df93096a1c250a1e22a742bb86fc410acdfbf0655b237
+    environment:
+      SWE_TASK_DIR: /app/config/tasks
+    volumes:
+      - ${SWE_MODELS_FILE:-./models.local.json}:/app/config/models.json:ro
+      - ./data/phase25-local/tasks:/app/config/tasks:ro
+  worker:
+    image: sha256:24399f7dc25ee551268b8719d9c6fe0db55e98236fe27e95b4b259bdcad4fe7a
+    environment:
+      SWE_TASK_DIR: /app/config/tasks
+      MSWEA_GLOBAL_CONFIG_DIR: /tmp/swe-eval-mini-config
+    volumes:
+      - ${SWE_MODELS_FILE:-./models.local.json}:/app/config/models.json:ro
+      - ./data/phase25-local/tasks:/app/config/tasks:ro

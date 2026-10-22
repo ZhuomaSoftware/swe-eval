@@ -1,0 +1,8 @@
+# Local loopback console only. Use after compose.yaml and compose.dev.yaml.
+# This file changes only the API login settings; model/worker settings are preserved.
+services:
+  api:
+    environment:
+      SWE_UI_PASSWORD_HASH: ${SWE_UI_PASSWORD_HASH:?Configure console password hash in .env}
+      SWE_PUBLIC_ORIGIN: http://127.0.0.1:8000
+      SWE_COOKIE_SECURE: "false"

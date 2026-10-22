@@ -1,0 +1,12 @@
+--- a/src/swe_eval/analytics.py
++++ b/src/swe_eval/analytics.py
+@@ -160,7 +160,8 @@
+         # Pass@1's first-attempt denominator must retain infrastructure failures.
+         for key in ('pass_at_1','pass_at_1_tasks','attempt_success_rate'):
+             data['metrics'][key]=group['metrics'][key]
+-        data['freshness_seconds']=max(0,time.time()-group['evaluated_at'])
++        data['evaluated_at']=max(r['finished_at'] for r in runs)
++        data['freshness_seconds']=max(0,time.time()-data['evaluated_at'])
+         data['quality']={'trusted':True,'scoring_eligible':len({r['snapshot']['task_fingerprint'] for r in runs})>=5 and len(runs)>=5 and group['comparison_eligible'],
+                          'capability_weights':None,'eligible_run_count':len(runs), 'valid_task_count':len({r['snapshot']['task_fingerprint'] for r in runs}),
+                          'excluded_attempt_count':group['metrics']['attempts']-len(runs)}

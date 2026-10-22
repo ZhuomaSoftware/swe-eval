@@ -9,13 +9,20 @@ from .schema import ModelProfile
 PROTOCOL = 'swe-eval-grading-v2'
 
 
+class BatchRequestBudgetError(ValueError):
+    """Only validated integer limits enter this safe administrator message."""
+    def __init__(self, required, configured):
+        super().__init__(f'批次总请求预留不足：至少需要 {int(required)} 次，当前为 {int(configured)} 次。'
+                         '预留按题目数 × 尝试次数 × 各模型有效请求上限之和计算，启用恢复时另含恢复预留；有效上限取实验预算与模型配置的较小值。')
+
+
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
 def harness_revision():
     root = Path(__file__).parent
-    files = ['agent.py', 'providers.py', 'engine.py', 'sandbox.py', 'candidate_runner.py',
+    files = ['agent.py', 'providers.py', 'provider_errors.py', 'retries.py', 'outbound.py', 'engine.py', 'sandbox.py', 'candidate_runner.py',
              'benchmarks/data/intervals/hidden/grade.py']
     return digest({p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in files})
 
@@ -43,7 +50,7 @@ def snapshot(task, profile, effective=None):
     from .official_engine import stable_task
     if official:
         root=Path(__file__).parent
-        harness=digest({"upstream":task.harness_commit,"version":task.harness_version,**{name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in ("official_engine.py","official_harness.py","swebench_bridge.py","benchmarks/official_sandbox.py")}})
+        harness=digest({"upstream":task.harness_commit,"version":task.harness_version,**{name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in ("official_engine.py","official_harness.py","swebench_bridge.py","benchmarks/official_sandbox.py","providers.py","provider_errors.py","retries.py","outbound.py")}})
     else:harness=harness_revision()
     return dict(schema_version=1, grading_protocol=task.grading_protocol if official else PROTOCOL, harness_revision=harness,
                 **({"subset":task.subset,"agent_version":"2.4.6","official_harness_version":task.harness_version,"official_harness_commit":task.harness_commit,"environment_image_digest":task.environment_image_digest} if official else {}),
@@ -57,7 +64,9 @@ def snapshot(task, profile, effective=None):
 
 def submit_batch(repo, benchmark, profiles, body, settings):
     # Optional management metadata must not change Phase 2.6 request hashes.
-    request_configuration = body.model_dump(mode='json', exclude={'subset_id','subset_revision'} if body.subset_id is None else set())
+    request_configuration = body.model_dump(mode='json', exclude=({'subset_id','subset_revision'} if body.subset_id is None else set()) | {k for k in ('api_retry','run_recovery') if getattr(body,k) is None})
+    from .retries import retry_schema_ready
+    if (body.api_retry or body.run_recovery) and not retry_schema_ready(repo):raise ValueError('explicit migrate-retries required before retry-enabled admission')
     with repo.connect() as db:
         prior = db.execute('SELECT id,request_hash FROM evaluation_batches WHERE idempotency_key=?',(body.idempotency_key,)).fetchone()
     if prior:
@@ -68,7 +77,8 @@ def submit_batch(repo, benchmark, profiles, body, settings):
     count = len(body.task_ids) * len(body.model_profile_ids) * body.attempts
     if body.max_duration > settings.max_batch_duration or body.max_requests > settings.max_batch_requests:
         raise ValueError('batch duration or request allowance exceeds server limit')
-    if count > settings.max_batch_runs:
+    recovery_multiplier = 1 + (body.run_recovery.max_recoveries if body.run_recovery and body.run_recovery.enabled else 0)
+    if count * recovery_multiplier > settings.max_batch_runs:
         raise ValueError('batch exceeds SWE_MAX_BATCH_RUNS')
     tasks = [benchmark.get_task(x) for x in body.task_ids]
     if any(getattr(task,"benchmark_type",None)=="official" and not task.environment_ready for task in tasks):
@@ -87,10 +97,13 @@ def submit_batch(repo, benchmark, profiles, body, settings):
             effective = effective_profile(profile, body.limits, body.reasoning.get(profile.id), profile.id in body.reasoning)
             for attempt in range(1, body.attempts + 1):
                 provenance=snapshot(task, profile, effective)
+                if body.api_retry:provenance['api_retry']=body.api_retry.model_dump()
+                if body.run_recovery:provenance['run_recovery']=body.run_recovery.model_dump()
+                if body.api_retry or body.run_recovery:provenance['runtime_fingerprint']=digest({'base':provenance['runtime_fingerprint'],'api_retry':provenance.get('api_retry'),'run_recovery':provenance.get('run_recovery')})
                 if subset:provenance['selected_subset']={'id':subset['id'],'revision':subset['revision'],'fingerprint':subset['fingerprint']}
                 specs.append((task.model_dump(mode='json'), model_snapshot(profile), provenance, attempt))
     # Reserve each attempt's complete call allowance. No usage estimate is used as a hard budget.
-    reserved = sum(x[2]['effective_model']['max_model_calls'] for x in specs)
+    reserved = sum(x[2]['effective_model']['max_model_calls'] for x in specs) * recovery_multiplier
     if reserved > body.max_requests:
-        raise ValueError('reserved per-run request allowances exceed batch max_requests')
+        raise BatchRequestBudgetError(reserved,body.max_requests)
     return repo.create_batch(request_configuration, specs, settings.max_pending_runs, reserved)

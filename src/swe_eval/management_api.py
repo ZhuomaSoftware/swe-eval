@@ -1,5 +1,5 @@
 """Administrator-only management surface. No secrets in responses or exceptions."""
-import time
+import time,re,os
 from collections import Counter
 from fastapi import HTTPException,Query
 from .management import ConfigurationRepository,administration_ready,current_profiles
@@ -10,6 +10,8 @@ from .providers import ProviderError
 from .administration_jobs import AdministrativeJobs
 from .center_schema import BatchSubmission
 from .storage import Conflict
+from .security import Redactor
+from .center import BatchRequestBudgetError
 
 def install_management(app,settings,repo,benchmark,auth):
     c=ConfigurationRepository(repo,settings);jobs=AdministrativeJobs(repo,settings)
@@ -17,6 +19,7 @@ def install_management(app,settings,repo,benchmark,auth):
         try:return fn(*args,**kwargs)
         except KeyError:raise HTTPException(404,'resource not found') from None
         except Conflict:raise
+        except BatchRequestBudgetError as error:raise HTTPException(422,str(error)) from None
         except (ValueError,ProviderError):raise HTTPException(422,'invalid configuration, revision, credential or outbound policy; review field limits and server configuration') from None
     def require():
         if not administration_ready(repo):raise HTTPException(503,'administration requires explicit migrate-admin authorization')
@@ -25,7 +28,7 @@ def install_management(app,settings,repo,benchmark,auth):
     def capabilities():
         try:SecretBox();key=True
         except SecretUnavailable:key=False
-        return {'schema_ready':administration_ready(repo),'credential_store_ready':key,'max_batch_runs':settings.max_batch_runs,'max_pending_runs':settings.max_pending_runs,'validation_concurrency':1,'max_validation_instances':5,'inference_connection_test':False}
+        return {'schema_ready':administration_ready(repo),'credential_store_ready':key,'max_batch_runs':settings.max_batch_runs,'max_pending_runs':settings.max_pending_runs,'max_batch_requests':settings.max_batch_requests,'max_batch_duration':settings.max_batch_duration,'validation_concurrency':1,'max_validation_instances':5,'inference_connection_test':False}
     @app.get(prefix+'/providers',dependencies=auth)
     def providers():require();return {'items':guard(c.providers)}
     @app.post(prefix+'/providers',dependencies=auth,status_code=201)
@@ -56,6 +59,29 @@ def install_management(app,settings,repo,benchmark,auth):
             raise HTTPException(502,'bounded non-inference provider connection test failed') from None
     @app.get(prefix+'/providers/{identity}/history',dependencies=auth)
     def provider_history(identity:str):require();return {'items':guard(c.history,'provider',identity)}
+    @app.post(prefix+'/providers/{identity}/discover-models',dependencies=auth)
+    def discover_models(identity:str):
+        require();p=guard(c.provider,identity)
+        if not p['enabled'] or p['archived']:raise HTTPException(409,'provider is disabled or archived')
+        try:
+            key=c.secret(identity,p['credential_version'])
+            response=request_json(p['base_url'].rstrip('/')+'/models',key,timeout=min(5,p['request_timeout']))
+            if not isinstance(response.get('data'),list):raise ProviderError('invalid model-list schema')
+            # Treat the entire upstream document as untrusted. Return only bounded,
+            # unique identifiers, never arbitrary metadata or reflected credentials.
+            redact=Redactor([key,settings.admin_token,os.getenv('SWE_CONFIG_MASTER_KEY','')])
+            identities=set()
+            for item in response['data']:
+                value=item.get('id') if isinstance(item,dict) else None
+                if isinstance(value,str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:/@()+-]{0,199}',value) and not redact.contains_secret(value):
+                    identities.add(value)
+            models=[{'id':value} for value in sorted(identities)[:500]]
+            c.connection_event(identity,p['revision'],'ok')
+            return {'provider_id':identity,'provider_revision':p['revision'],'items':models,
+                    'total':len(identities),'truncated':len(identities)>500,'inference_performed':False}
+        except (ProviderError,SecretUnavailable):
+            c.connection_event(identity,p['revision'],'failed','connection, credential, response schema or outbound policy error')
+            raise HTTPException(502,'bounded non-inference provider model discovery failed') from None
     @app.get(prefix+'/models',dependencies=auth)
     def models():
         require()
@@ -119,15 +145,19 @@ def install_management(app,settings,repo,benchmark,auth):
         from .center import effective_profile
         def calculate():
             profiles=current_profiles(settings,repo);tasks=[benchmark.get_task(x) for x in body.task_ids];selected=[profiles[x] for x in body.model_profile_ids];count=len(tasks)*len(selected)*body.attempts
-            if count>settings.max_batch_runs:raise ValueError('oversized batch')
+            from .retries import retry_schema_ready
+            if (body.api_retry or body.run_recovery) and not retry_schema_ready(repo):raise ValueError('explicit migrate-retries required')
+            multiplier=1+(body.run_recovery.max_recoveries if body.run_recovery and body.run_recovery.enabled else 0)
+            if count*multiplier>settings.max_batch_runs:raise ValueError('oversized batch including recovery reservation')
             if body.max_duration>settings.max_batch_duration or body.max_requests>settings.max_batch_requests:raise ValueError('server limit exceeded')
             if body.subset_id:
                 subset=c.subset(body.subset_id,benchmark,body.subset_revision)
                 if subset['archived'] or set(subset['task_ids'])!=set(body.task_ids):raise ValueError('subset mismatch')
-            reserved=len(tasks)*body.attempts*sum(effective_profile(p,body.limits,body.reasoning.get(p.id),p.id in body.reasoning).max_model_calls for p in selected)
+            reserved=len(tasks)*body.attempts*sum(effective_profile(p,body.limits,body.reasoning.get(p.id),p.id in body.reasoning).max_model_calls for p in selected)*multiplier
             blocked=sum(not getattr(t,'environment_ready',True) or c.dataset_archived(t.dataset_version) for t in tasks)
-            if reserved>body.max_requests:raise ValueError('request reservations exceed aggregate limit')
-            return {'task_count':len(tasks),'ready_tasks':len(tasks)-blocked,'blocked_tasks':blocked,'model_count':len(selected),'total_attempts':count,'reserved_requests':reserved,'maximum_run_seconds':body.limits.timeout,'known_cost_estimate':None,'cost_notice':'实际输入长度与请求用量未知；不提供硬性费用上限','unknown_pricing':any(p.pricing is None for p in selected),'submittable':blocked==0,'models':[p.public() for p in selected]}
+            if reserved>body.max_requests:raise BatchRequestBudgetError(reserved,body.max_requests)
+            maximum=max(min(t.time_limit,effective_profile(p,body.limits).max_evaluation_duration) for t in tasks for p in selected)
+            return {'task_count':len(tasks),'ready_tasks':len(tasks)-blocked,'blocked_tasks':blocked,'model_count':len(selected),'total_attempts':count,'reserved_requests':reserved,'possible_recoveries':count*(multiplier-1),'api_attempt_multiplier':body.api_retry.max_attempts if body.api_retry and body.api_retry.enabled else 1,'maximum_run_seconds':maximum,'known_cost_estimate':None,'cost_notice':'实际输入长度与请求用量未知；不提供硬性费用上限','unknown_pricing':any(p.pricing is None for p in selected),'submittable':blocked==0,'models':[p.public() for p in selected]}
         return guard(calculate)
 
 def _import_time(catalogue,revision):

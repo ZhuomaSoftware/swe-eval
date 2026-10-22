@@ -152,6 +152,22 @@ class Metrics(StrictModel):
     assertions_passed: int | None = None
     agent_steps: int = 0
     model_requests: int = 0
+    known_input_tokens: int = 0
+    known_output_tokens: int = 0
+    known_total_tokens: int = 0
+    known_cost_subtotal: float | None = None
+    known_cost_currency: str | None = None
+    http_attempts: int = 0
+    http_retries: int = 0
+    retry_backoff_seconds: float = 0
+    provider_cooldown_seconds: float = 0
+    first_api_attempt_at: float | None = None
+    last_api_attempt_at: float | None = None
+    provider_outcome: str | None = None
+    last_provider_error: dict = Field(default_factory=dict)
+    retry_exhaustion_reason: str | None = None
+    recovery_eligible: bool = False
+    billing_uncertain: bool = False
     input_tokens: int | None = None
     output_tokens: int | None = None
     reasoning_tokens: int | None = None

@@ -40,7 +40,10 @@ class RunRepository(Protocol):
     def service_id(self) -> str: ...
 
 
-class SQLiteRepository:
+from .retries import RetryRepositoryMixin
+
+
+class SQLiteRepository(RetryRepositoryMixin):
     def __init__(self, path: Path, redactor: Redactor | None = None):
         self.path = path
         self.redact = redactor or Redactor()
@@ -154,6 +157,10 @@ class SQLiteRepository:
                 record['batch'] = dict(attempt) if attempt else None
                 snap = db.execute("SELECT snapshot_json FROM evaluation_snapshots WHERE run_id=?", (run_id,)).fetchone()
                 record['snapshot'] = json.loads(snap[0]) if snap else None
+                record['retry'] = self.retry_info(db,run_id)
+                if not attempt and record['retry'] and record['retry']['binding']:
+                    original=db.execute('SELECT * FROM batch_attempts WHERE run_id=?',(record['retry']['binding']['parent_id'],)).fetchone()
+                    record['batch']=dict(original) if original else None
             return record
 
     def list(self, limit=50, offset=0):
@@ -168,8 +175,17 @@ class SQLiteRepository:
             # One active run per service, including a directly launched CLI run.
             if db.execute("SELECT 1 FROM runs WHERE state IN ('preparing','running','evaluating')").fetchone():
                 return None
-            row = (db.execute("SELECT id FROM runs WHERE state='queued' AND id=?", (run_id,)).fetchone()
-                   if run_id else db.execute("SELECT id FROM runs WHERE state='queued' ORDER BY created_at, id LIMIT 1").fetchone())
+            candidates=db.execute("SELECT r.id,r.model_json,s.snapshot_json FROM runs r LEFT JOIN evaluation_snapshots s ON s.run_id=r.id WHERE r.state='queued'"+(" AND r.id=?" if run_id else "")+" ORDER BY r.created_at,r.id",(run_id,) if run_id else ()).fetchall()
+            row=None
+            for candidate in candidates:
+                if db.execute("SELECT 1 FROM metadata WHERE key='api_retry_schema'").fetchone():
+                    due=db.execute('SELECT next_eligible_at FROM run_recoveries WHERE child_id=?',(candidate['id'],)).fetchone()
+                    if due and due[0]>time.time():continue
+                    model=json.loads(candidate['model_json']);snap=json.loads(candidate['snapshot_json']) if candidate['snapshot_json'] else {}
+                    key=(model.get('provider_id') or model['upstream_id'])+':'+snap.get('endpoint_identity','unknown')
+                    cool=db.execute('SELECT until_at FROM provider_cooldowns WHERE provider_key=?',(key,)).fetchone()
+                    if cool and cool[0]>time.time():continue
+                row=(candidate['id'],);break
             if not row:
                 return None
             now = time.time()
@@ -226,6 +242,9 @@ class SQLiteRepository:
                        (state, self.redact(error) if error else None, now,
                         now if state in TERMINAL else None, normalized, run_id))
             self._log(db, run_id, str(state), error or f"Evaluation {state}")
+            if state==RunState.FAILED and getattr(self,'recovery_settings',None) and db.execute("SELECT 1 FROM metadata WHERE key='api_retry_schema'").fetchone():
+                owner=db.execute('SELECT worker_id FROM runs WHERE id=?',(run_id,)).fetchone()[0]
+                self._schedule_recoveries(db,owner,self.recovery_settings)
 
     def save_metrics(self, run_id, metrics):
         safe = json.dumps(self.redact.data(metrics.model_dump(mode="json")))
@@ -321,7 +340,11 @@ class SQLiteRepository:
             ids = [row["id"] for row in rows]
             for row in rows:
                 run_id = row["id"]
-                normalized = self._metrics_json(Metrics.model_validate_json(row["metrics_json"]), RunState.FAILED)
+                interrupted_metrics=Metrics.model_validate_json(row["metrics_json"])
+                if interrupted_metrics.recovery_eligible:
+                    interrupted_metrics.recovery_eligible=False
+                    interrupted_metrics.retry_exhaustion_reason='worker_interrupted'
+                normalized = self._metrics_json(interrupted_metrics, RunState.FAILED)
                 db.execute("UPDATE runs SET state='failed',error='worker_interrupted',finished_at=?,updated_at=?,metrics_json=? WHERE id=?",
                            (time.time(), time.time(), normalized, run_id))
                 self._log(db, run_id, "failed", "worker_interrupted: previous worker stopped; explicit retry required")
@@ -329,6 +352,7 @@ class SQLiteRepository:
 
     def create_batch(self, config, specs, max_pending, reserved):
         from .center import digest
+        config={k:v for k,v in config.items() if k not in ('api_retry','run_recovery') or v is not None}
         request_hash = digest(config)
         with self.connect(write=True) as db:
             prior = db.execute('SELECT id,request_hash FROM evaluation_batches WHERE idempotency_key=?',
@@ -338,7 +362,7 @@ class SQLiteRepository:
                     raise Conflict('idempotency key already used for different configuration')
                 batch_id = prior['id']
             else:
-                if self._pending(db) + len(specs) > max_pending:
+                if self._pending(db) + len(specs)*(1+int((config.get('run_recovery') or {}).get('enabled',False))) > max_pending:
                     raise Conflict('pending queue limit reached')
                 batch_id, now = uuid.uuid4().hex, time.time()
                 stored = dict(config, reserved_requests=reserved, monetary_enforcement='unavailable')
@@ -360,11 +384,18 @@ class SQLiteRepository:
             attempts = [dict(x) for x in db.execute('SELECT a.*,r.state,r.error,r.metrics_json FROM batch_attempts a JOIN runs r ON r.id=a.run_id WHERE batch_id=? ORDER BY task_id,profile_id,attempt',(batch_id,))]
             for item in attempts:
                 item['metrics'] = json.loads(item.pop('metrics_json'))
+            recovery=[]
+            if db.execute("SELECT 1 FROM metadata WHERE key='api_retry_schema'").fetchone():
+                recovery=[dict(x) for x in db.execute('SELECT x.*,r.state,r.error,r.metrics_json FROM run_recoveries x JOIN runs r ON r.id=x.child_id WHERE x.batch_id=?',(batch_id,))]
+                for item in recovery:item['metrics']=json.loads(item.pop('metrics_json'))
+            value['recoveries']=recovery
+            value['recovery_progress']={state:sum(x['state']==state for x in recovery) for state in RunState}
+            value['automatic_recovery_count']=len(recovery)
             value['attempts'] = attempts
             value['progress'] = {state: sum(x['state']==state for x in attempts) for state in RunState}
             value['total'] = len(attempts)
             value['terminal'] = sum(x['state'] in TERMINAL for x in attempts)
-            if value['terminal'] == value['total']:
+            if value['terminal'] == value['total'] and all(x['state'] in TERMINAL for x in recovery):
                 # Terminal attempts are immutable. A late stop signal cannot
                 # relabel completed work, even if final completion won a race.
                 value['state'] = ('completed' if all(x['state']=='completed' for x in attempts)
@@ -381,6 +412,15 @@ class SQLiteRepository:
 
     def _reconcile_batches(self, db):
         now = time.time()
+        if db.execute("SELECT 1 FROM metadata WHERE key='api_retry_schema'").fetchone():
+            db.execute("UPDATE evaluation_batches SET cancel_requested=1,stop_reason='batch_deadline_exceeded' WHERE deadline<=? AND cancel_requested=0 AND EXISTS(SELECT 1 FROM run_recoveries x JOIN runs r ON r.id=x.child_id WHERE x.batch_id=evaluation_batches.id AND r.state IN ('queued','preparing','running','evaluating'))",(now,))
+            children=db.execute("SELECT r.id,r.state,r.metrics_json FROM run_recoveries x JOIN runs r ON r.id=x.child_id JOIN evaluation_batches b ON b.id=x.batch_id WHERE b.cancel_requested=1 AND r.state IN ('queued','preparing','running','evaluating')").fetchall()
+            for row in children:
+                if row['state']=='queued':
+                    normalized=self._metrics_json(Metrics.model_validate_json(row['metrics_json']),RunState.CANCELLED)
+                    db.execute("UPDATE runs SET state='cancelled',cancel_requested=1,finished_at=?,updated_at=?,metrics_json=? WHERE id=?",(now,now,normalized,row['id']))
+                    self._log(db,row['id'],'cancelled','Batch recovery stopped before execution')
+                else:db.execute('UPDATE runs SET cancel_requested=1 WHERE id=?',(row['id'],))
         db.execute("UPDATE evaluation_batches SET cancel_requested=1,stop_reason='batch_deadline_exceeded' WHERE deadline<=? AND cancel_requested=0 AND EXISTS (SELECT 1 FROM batch_attempts a JOIN runs r ON r.id=a.run_id WHERE a.batch_id=evaluation_batches.id AND r.state IN ('queued','preparing','running','evaluating'))",(now,))
         rows = db.execute("SELECT r.id,r.state,r.metrics_json FROM runs r JOIN batch_attempts a ON a.run_id=r.id JOIN evaluation_batches b ON b.id=a.batch_id WHERE b.cancel_requested=1 AND r.state IN ('queued','preparing','running','evaluating')").fetchall()
         for row in rows:
@@ -400,13 +440,15 @@ class SQLiteRepository:
             if not db.execute('SELECT 1 FROM evaluation_batches WHERE id=?',(batch_id,)).fetchone():
                 raise KeyError(batch_id)
             db.execute("UPDATE evaluation_batches SET cancel_requested=1,stop_reason=coalesce(stop_reason,'administrator_cancelled') WHERE id=? AND EXISTS (SELECT 1 FROM batch_attempts a JOIN runs r ON r.id=a.run_id WHERE a.batch_id=evaluation_batches.id AND r.state IN ('queued','preparing','running','evaluating'))",(batch_id,))
+            if db.execute("SELECT 1 FROM metadata WHERE key='api_retry_schema'").fetchone():
+                db.execute("UPDATE evaluation_batches SET cancel_requested=1,stop_reason=coalesce(stop_reason,'administrator_cancelled') WHERE id=? AND EXISTS(SELECT 1 FROM run_recoveries x JOIN runs r ON r.id=x.child_id WHERE x.batch_id=evaluation_batches.id AND r.state IN ('queued','preparing','running','evaluating'))",(batch_id,))
             self._reconcile_batches(db)
         return self.batch(batch_id)
 
     def query_runs(self, *, limit=50, offset=0, **filters):
         clauses, values = [], []
         expressions = {'model_profile_id':"json_extract(r.model_json,'$.id')", 'upstream_id':"json_extract(r.model_json,'$.upstream_id')",
-            'benchmark':"json_extract(r.task_json,'$.benchmark')", 'state':'r.state', 'batch_id':'a.batch_id',
+            'benchmark':"json_extract(r.task_json,'$.benchmark')", 'state':'r.state', 'batch_id':"coalesce(a.batch_id,(SELECT x.batch_id FROM run_recoveries x WHERE x.child_id=r.id))" if __import__('swe_eval.retries',fromlist=['retry_schema_ready']).retry_schema_ready(self) else 'a.batch_id',
             'grading_protocol':"coalesce(json_extract(r.metrics_json,'$.execution_metadata.grading_protocol'),json_extract(s.snapshot_json,'$.grading_protocol'),'legacy/unknown')"}
         for key, expression in expressions.items():
             if filters.get(key) is not None:
@@ -422,6 +464,7 @@ class SQLiteRepository:
             items = []
             for row in rows:
                 value = self._decode(row)
+                value['retry']=self.retry_info(db,value['id'])
                 value['snapshot'] = json.loads(value.pop('snapshot_json')) if value.get('snapshot_json') else None
                 value.pop('snapshot_json',None)
                 items.append(value)

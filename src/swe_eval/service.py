@@ -24,6 +24,7 @@ def repository(settings: Settings, *, worker=False):
                 pass
     repo = SQLiteRepository(settings.database, Redactor(secrets))
     repo.initialize()
+    repo.recovery_settings=settings
     return repo
 
 

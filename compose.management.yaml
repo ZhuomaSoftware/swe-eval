@@ -5,7 +5,7 @@ x-common: &common
   cap_drop: [ALL]
   security_opt: [no-new-privileges:true]
   init: true
-  tmpfs: [/tmp:size=256m,nosuid,nodev]
+  tmpfs: ["/tmp:size=256m,nosuid,nodev"]
   env_file:
     - path: ${SWE_MANAGEMENT_ENV_FILE:?Provide a restricted external environment file}
       format: raw

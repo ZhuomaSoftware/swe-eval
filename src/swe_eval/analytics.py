@@ -13,6 +13,7 @@ METHODOLOGY = {
     'trusted_origin':'live only for trusted overview/success/shadow; non-live comparison groups are explicitly diagnostic',
     'freshness':'evaluated_at from valid completed live evidence only; last_attempted_at is separate; generated_at is export time',
     'percentiles':'linear interpolation at (n-1)*p',
+    'retries':'API retries consume the physical HTTP cap. Automatic recovery children are excluded from benchmark denominators and Pass@1; operational recovery and total HTTP/cost fields are separate.',
     'cost':'unknown if any included attempt cost is unknown; known subtotal shown separately',
     'coverage':'intersection of versioned task fingerprints within identical benchmark/dataset/harness cohorts',
     'limitations':'Local grading-v2 and official test-log reports remain separate. Internal subsets are not full official SWE-bench scores. Gold validation/stubs are not model capability scores.'}
@@ -38,7 +39,7 @@ def eligible_attempt(run):
 
 
 def trusted_attempt(run):
-    return eligible_attempt(run) and run['snapshot']['data_origin'] == 'live' and run['snapshot']['grading_protocol']==PROTOCOL
+    return eligible_attempt(run) and not ((run.get('retry') or {}).get('kind')=='automatic_recovery') and run['snapshot']['data_origin'] == 'live' and run['snapshot']['grading_protocol']==PROTOCOL
 
 
 def trusted_success(run):
@@ -83,7 +84,19 @@ def percentile(values, p):
     return values[low]+(values[high]-values[low])*(x-low)
 
 
+def http_attempt_count(run):
+    m=run['metrics']
+    # Old adapters made exactly one physical call per logical request. New
+    # outcomes distinguish admission failures with zero transport dispatches.
+    if m.get('provider_outcome') is not None or m.get('first_api_attempt_at') is not None or m.get('http_attempts',0)>0:
+        return m.get('http_attempts',0)
+    return m['model_requests']
+
+
 def summary(runs):
+    all_runs=list(runs)
+    recovery=[r for r in all_runs if (r.get('retry') or {}).get('kind')=='automatic_recovery']
+    runs=[r for r in all_runs if r not in recovery]
     evaluated = [r for r in runs if valid(r)]
     resolved = sum(r['metrics']['resolved'] is True for r in evaluated)
     independent = {}
@@ -98,6 +111,7 @@ def summary(runs):
     single_currency=len(currencies)<=1
     by_currency={str(c):sum(r['metrics']['cost'] for r in runs if r['metrics']['cost'] is not None and r['metrics'].get('currency')==c) for c in currencies}
     requests = sum(r['metrics']['model_requests'] for r in runs)
+    http_attempts=sum(http_attempt_count(r) for r in runs)
     api_errors = sum(r['metrics']['api_errors'] for r in runs)
     infra = sum(r['state'] in ('failed','timeout') for r in runs)
     totals = {}
@@ -105,7 +119,21 @@ def summary(runs):
         values = [r['metrics'][field] for r in runs]
         totals[field] = sum(values) if values and all(v is not None for v in values) else None
         totals[field+'_known_subtotal'] = sum(v for v in values if v is not None)
-    return dict(attempts=len(runs),valid_evaluations=len(evaluated),resolved=resolved,
+    operational_costs={}
+    for run in all_runs:
+        m=run['metrics'];amount=m.get('known_cost_subtotal') if m.get('known_cost_subtotal') is not None else m['cost']
+        currency=m.get('known_cost_currency') or m.get('currency')
+        if amount is not None:operational_costs[currency]=operational_costs.get(currency,0)+amount
+    return dict(operational_known_cost_by_currency=operational_costs,
+        operational_recovery_runs=len(recovery),operational_recovery_resolved=sum(valid(r) and r['metrics']['resolved'] is True for r in recovery),
+        operational_http_attempts=sum(http_attempt_count(r) for r in all_runs),
+        operational_known_cost_subtotal=next(iter(operational_costs.values())) if len(operational_costs)==1 else None,
+        operational_unknown_cost_runs=sum(r['metrics']['cost'] is None for r in all_runs),
+        http_attempts=http_attempts,http_retries=sum(r['metrics'].get('http_retries',0) for r in runs),
+        original_scheduled_attempts=sum(r['parent_id'] is None for r in runs),
+        original_scheduled_resolved=sum(valid(r) and r['metrics']['resolved'] is True and r['parent_id'] is None for r in runs),
+        resolved_after_request_retries=sum(valid(r) and r['metrics']['resolved'] is True and r['metrics'].get('http_retries',0)>0 for r in runs),
+        attempts=len(runs),valid_evaluations=len(evaluated),resolved=resolved,
         repair_failures=len(evaluated)-resolved,infrastructure_errors=infra,
         incomplete=sum(r['state'] in ('queued','preparing','running','evaluating') for r in runs),
         cancelled=sum(r['state']=='cancelled' for r in runs),
@@ -115,7 +143,7 @@ def summary(runs):
         average_seconds=sum(durations)/len(durations) if durations else None,
         p50_seconds=percentile(durations,.5),p95_seconds=percentile(durations,.95),
         latency_samples=len(durations),model_requests=requests,api_errors=api_errors,
-        api_error_rate=api_errors/requests if requests else None,
+        api_error_rate=api_errors/http_attempts if http_attempts else None,
         infrastructure_failure_rate=infra/len(runs) if runs else None,
         currency=next(iter(currencies)) if len(currencies)==1 else None,mixed_currencies=not single_currency,known_cost_by_currency=by_currency,
         known_cost_subtotal=sum(known) if known and single_currency else None,unknown_cost_attempts=len(costs)-len(known),
@@ -200,7 +228,7 @@ def shadow_export(repo):
             continue
         if group['data_origins']!=['live'] or not group['upstream_verified']:
             continue
-        runs = [repo.get(x['run_id']) for x in group['task_matrix'] if x['valid']]
+        runs = [r for x in group['task_matrix'] if x['valid'] for r in [repo.get(x['run_id'])] if trusted_attempt(r)]
         if not runs:
             continue
         data = {k:v for k,v in group.items() if k not in ('metrics','matched_metrics','task_matrix')}

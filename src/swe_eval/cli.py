@@ -36,6 +36,7 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init-db")
     commands.add_parser("migrate-admin", help="Explicitly migrate an authorized schema-2 database to administration schema 3")
+    commands.add_parser("migrate-retries", help="Explicit additive retry feature migration on authorized schema 3")
     commands.add_parser("doctor")
     serve = commands.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
@@ -84,6 +85,10 @@ def main(argv=None):
                 from .dataset_validation import validate
                 result=validate(settings,args);print_json(result)
                 return 0 if args.dry_run or all(x["status"]=="validated" for x in result["items"]) else 1
+        elif args.command == "migrate-retries":
+            from .retries import migrate_retries
+            migrate_retries(repository(settings))
+            print_json({"schema":3,"api_retry_schema":1,"status":"retry migration complete"})
         elif args.command == "migrate-admin":
             from .management import migrate_administration
             migrate_administration(repository(settings))

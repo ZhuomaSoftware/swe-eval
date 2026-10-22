@@ -1,0 +1,33 @@
+# Local development only. Use with compose.yaml, never on a shared worker host.
+services:
+  api:
+    environment:
+      PYTHONPATH: /app/src
+    command:
+      - python
+      - -m
+      - uvicorn
+      - swe_eval.api:create_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/src
+      - --no-access-log
+    volumes:
+      - ./src:/app/src:ro
+      - ${SWE_MODELS_FILE:-./models.local.json}:/app/config/models.json:ro
+
+  worker:
+    build:
+      target: development
+    environment:
+      PYTHONPATH: /app/src
+      MSWEA_GLOBAL_CONFIG_DIR: /tmp/swe-eval-mini-config
+    volumes:
+      - ./src:/app/src:ro
+      - ./tests:/app/tests:ro
+      - ${SWE_MODELS_FILE:-./models.local.json}:/app/config/models.json:ro

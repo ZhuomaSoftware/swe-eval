@@ -145,6 +145,7 @@ class Worker:
             while not self.stop.is_set():
                 if not self.repo.heartbeat(self.owner, self.settings.lease_seconds):
                     raise Conflict("worker lease was lost")
+                self.repo.schedule_recoveries(self.owner,self.settings)
                 record = self.repo.claim(self.owner)
                 if record:
                     self.supervise(record)

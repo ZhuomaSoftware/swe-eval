@@ -1,6 +1,7 @@
 from typing import Literal
 from pydantic import Field, model_validator
 from .schema import StrictModel
+from .retries import RequestRetryPolicy, RunRecoveryPolicy
 
 
 class RunLimits(StrictModel):
@@ -12,6 +13,8 @@ class RunLimits(StrictModel):
 
 
 class BatchSubmission(StrictModel):
+    api_retry: RequestRetryPolicy | None = None
+    run_recovery: RunRecoveryPolicy | None = None
     subset_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$")
     subset_revision: int | None = Field(default=None, ge=1)
     name: str = Field(min_length=1, max_length=120)
